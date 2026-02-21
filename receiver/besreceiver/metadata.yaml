@@ -1,0 +1,8 @@
+type: bes
+
+status:
+  class: receiver
+  stability:
+    alpha: [traces, logs]
+  codeowners:
+    active: [chagui]

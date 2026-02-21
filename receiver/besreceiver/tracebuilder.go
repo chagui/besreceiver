@@ -1,0 +1,510 @@
+package besreceiver
+
+import (
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"fmt"
+	"time"
+
+	"go.opentelemetry.io/collector/consumer"
+	"go.opentelemetry.io/collector/consumer/consumererror"
+	"go.opentelemetry.io/collector/pdata/pcommon"
+	"go.opentelemetry.io/collector/pdata/plog"
+	"go.opentelemetry.io/collector/pdata/ptrace"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/metric/noop"
+	"go.uber.org/zap"
+
+	pb "google.golang.org/genproto/googleapis/devtools/build/v1"
+
+	bep "github.com/chagui/besreceiver/internal/bep/buildeventstream"
+)
+
+const (
+	defaultInvocationTimeout = 1 * time.Hour
+	defaultReaperInterval    = 5 * time.Minute
+)
+
+// eventMsg is sent from gRPC handler goroutines to the owner goroutine.
+type eventMsg struct {
+	ctx          context.Context
+	invocationID string
+	event        *bep.BuildEvent
+	errCh        chan<- error
+}
+
+// TraceBuilderConfig holds tuning parameters for a TraceBuilder.
+type TraceBuilderConfig struct {
+	InvocationTimeout time.Duration
+	ReaperInterval    time.Duration
+	MeterProvider     metric.MeterProvider
+}
+
+// TraceBuilder converts BEP events into OTel trace spans and log records.
+// All invocation state is owned by a single goroutine started via Start().
+type TraceBuilder struct {
+	tracesConsumer    consumer.Traces
+	logsConsumer      consumer.Logs
+	logger            *zap.Logger
+	invocationTimeout time.Duration
+	reaperInterval    time.Duration
+	eventCh           chan eventMsg
+	stopCh            chan struct{}
+	doneCh            chan struct{}
+
+	// Internal metrics for observability.
+	activeInvocations metric.Int64UpDownCounter
+	eventsProcessed   metric.Int64Counter
+	invocationsReaped metric.Int64Counter
+	consumerErrors    metric.Int64Counter
+}
+
+// NewTraceBuilder creates a new TraceBuilder.
+// Either consumer may be nil if only one signal is configured.
+// Zero-value fields in cfg get sensible defaults.
+func NewTraceBuilder(tracesConsumer consumer.Traces, logsConsumer consumer.Logs, logger *zap.Logger, cfg TraceBuilderConfig) *TraceBuilder {
+	if cfg.InvocationTimeout <= 0 {
+		cfg.InvocationTimeout = defaultInvocationTimeout
+	}
+	if cfg.ReaperInterval <= 0 {
+		cfg.ReaperInterval = defaultReaperInterval
+	}
+	if cfg.MeterProvider == nil {
+		cfg.MeterProvider = noop.NewMeterProvider()
+	}
+	meter := cfg.MeterProvider.Meter("besreceiver")
+	activeInvocations, _ := meter.Int64UpDownCounter("bes.invocations.active",
+		metric.WithDescription("Number of active (in-flight) build invocations"),
+	)
+	eventsProcessed, _ := meter.Int64Counter("bes.events.processed",
+		metric.WithDescription("Total BEP events processed"),
+	)
+	invocationsReaped, _ := meter.Int64Counter("bes.invocations.reaped",
+		metric.WithDescription("Total invocations reaped by the stale-invocation reaper"),
+	)
+	consumerErrors, _ := meter.Int64Counter("bes.consumer.errors",
+		metric.WithDescription("Total errors from the traces consumer"),
+	)
+	return &TraceBuilder{
+		tracesConsumer:    tracesConsumer,
+		logsConsumer:      logsConsumer,
+		logger:            logger,
+		invocationTimeout: cfg.InvocationTimeout,
+		reaperInterval:    cfg.ReaperInterval,
+		activeInvocations: activeInvocations,
+		eventsProcessed:   eventsProcessed,
+		invocationsReaped: invocationsReaped,
+		consumerErrors:    consumerErrors,
+	}
+}
+
+// Start begins the owner goroutine that processes events and reaps stale invocations.
+func (tb *TraceBuilder) Start() {
+	tb.eventCh = make(chan eventMsg)
+	tb.stopCh = make(chan struct{})
+	tb.doneCh = make(chan struct{})
+	go tb.run()
+}
+
+// Stop signals the owner goroutine to exit and waits for it to finish.
+func (tb *TraceBuilder) Stop() {
+	if tb.stopCh != nil {
+		close(tb.stopCh)
+		<-tb.doneCh
+	}
+}
+
+func (tb *TraceBuilder) run() {
+	invocations := make(map[string]*invocationState)
+	ticker := time.NewTicker(tb.reaperInterval)
+	defer ticker.Stop()
+	defer close(tb.doneCh)
+
+	for {
+		select {
+		case msg := <-tb.eventCh:
+			err := tb.processEvent(msg.ctx, invocations, msg.invocationID, msg.event)
+			msg.errCh <- err
+		case <-ticker.C:
+			tb.reapStale(invocations, time.Now())
+		case <-tb.stopCh:
+			return
+		}
+	}
+}
+
+// ProcessOrderedBuildEvent processes a single BES OrderedBuildEvent.
+func (tb *TraceBuilder) ProcessOrderedBuildEvent(ctx context.Context, obe *pb.OrderedBuildEvent) error {
+	bazelEvent := obe.GetEvent().GetBazelEvent()
+	if bazelEvent == nil {
+		return nil
+	}
+
+	event, err := ParseBazelEvent(bazelEvent)
+	if err != nil {
+		return consumererror.NewPermanent(err)
+	}
+
+	invocationID := obe.GetStreamId().GetInvocationId()
+	errCh := make(chan error, 1)
+
+	select {
+	case tb.eventCh <- eventMsg{
+		ctx:          ctx,
+		invocationID: invocationID,
+		event:        event,
+		errCh:        errCh,
+	}:
+	case <-ctx.Done():
+		return fmt.Errorf("sending event to builder: %w", ctx.Err())
+	}
+
+	select {
+	case processErr := <-errCh:
+		return processErr
+	case <-ctx.Done():
+		return fmt.Errorf("waiting for event processing: %w", ctx.Err())
+	}
+}
+
+func (tb *TraceBuilder) processEvent(ctx context.Context, invocations map[string]*invocationState, invocationID string, event *bep.BuildEvent) error {
+	tb.eventsProcessed.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("event_type", eventTypeName(event)),
+	))
+	switch p := event.GetPayload().(type) {
+	case *bep.BuildEvent_Started:
+		return tb.handleBuildStarted(ctx, invocations, invocationID, p.Started)
+	case *bep.BuildEvent_Configured:
+		return tb.handleTargetConfigured(ctx, invocations, invocationID, event.GetId(), p.Configured)
+	case *bep.BuildEvent_Action:
+		return tb.handleActionExecuted(ctx, invocations, invocationID, event.GetId(), p.Action)
+	case *bep.BuildEvent_TestResult:
+		return tb.handleTestResult(ctx, invocations, invocationID, event.GetId(), p.TestResult)
+	case *bep.BuildEvent_Finished:
+		return tb.handleBuildFinished(ctx, invocations, invocationID, p.Finished)
+	case *bep.BuildEvent_BuildMetrics:
+		return tb.handleBuildMetrics(ctx, invocations, invocationID, p.BuildMetrics)
+	}
+	return nil
+}
+
+// eventTypeName returns a short name for the BEP event type, used as a metric attribute.
+func eventTypeName(event *bep.BuildEvent) string {
+	switch event.GetPayload().(type) {
+	case *bep.BuildEvent_Started:
+		return "started"
+	case *bep.BuildEvent_Configured:
+		return "configured"
+	case *bep.BuildEvent_Action:
+		return "action"
+	case *bep.BuildEvent_TestResult:
+		return "test_result"
+	case *bep.BuildEvent_Finished:
+		return "finished"
+	case *bep.BuildEvent_BuildMetrics:
+		return "build_metrics"
+	default:
+		return "other"
+	}
+}
+
+func (tb *TraceBuilder) handleBuildStarted(ctx context.Context, invocations map[string]*invocationState, invocationID string, started *bep.BuildStarted) error {
+	traceID := traceIDFromUUID(started.GetUuid())
+	rootSpanID := newSpanID()
+	invocations[invocationID] = newInvocationState(traceID, rootSpanID, started, time.Now())
+	tb.activeInvocations.Add(ctx, 1)
+
+	tb.logger.Debug("Build started",
+		zap.String("invocation_id", invocationID),
+		zap.String("uuid", started.GetUuid()),
+		zap.String("command", started.GetCommand()),
+	)
+
+	state := invocations[invocationID]
+	var ts time.Time
+	if started.GetStartTime() != nil {
+		ts = started.GetStartTime().AsTime()
+	}
+	tb.emitLog(ctx, state, invocationID, "bazel.build.started",
+		fmt.Sprintf("Build started: %s", started.GetCommand()),
+		plog.SeverityNumberInfo, ts,
+		map[string]string{
+			"bazel.command": started.GetCommand(),
+			"bazel.uuid":    started.GetUuid(),
+		},
+	)
+
+	// Root span is emitted in handleBuildFinished with both start and end timestamps.
+	return nil
+}
+
+func (tb *TraceBuilder) handleTargetConfigured(ctx context.Context, invocations map[string]*invocationState, invocationID string, eventID *bep.BuildEventId, configured *bep.TargetConfigured) error {
+	state := invocations[invocationID]
+	if state == nil {
+		return nil
+	}
+
+	tc := eventID.GetTargetConfigured()
+	if tc == nil {
+		return nil
+	}
+
+	state.addTarget(tc.GetLabel(), configured.GetTargetKind())
+
+	tb.logger.Debug("Target configured",
+		zap.String("invocation_id", invocationID),
+		zap.String("label", tc.GetLabel()),
+	)
+
+	tb.emitLog(ctx, state, invocationID, "bazel.target.configured",
+		fmt.Sprintf("Target configured: %s", tc.GetLabel()),
+		plog.SeverityNumberInfo, time.Time{},
+		map[string]string{
+			"bazel.target.label":     tc.GetLabel(),
+			"bazel.target.rule_kind": configured.GetTargetKind(),
+		},
+	)
+
+	return nil
+}
+
+func (tb *TraceBuilder) handleActionExecuted(ctx context.Context, invocations map[string]*invocationState, invocationID string, eventID *bep.BuildEventId, action *bep.ActionExecuted) error {
+	state := invocations[invocationID]
+	if state == nil {
+		return nil
+	}
+
+	ac := eventID.GetActionCompleted()
+	label := ""
+	configID := ""
+	if ac != nil {
+		label = ac.GetLabel()
+		configID = ac.GetConfiguration().GetId()
+	}
+
+	state.addAction(label, configID, action)
+
+	severity := plog.SeverityNumberInfo
+	body := fmt.Sprintf("Action completed: %s %s", action.GetType(), label)
+	if !action.GetSuccess() {
+		severity = plog.SeverityNumberError
+		body = fmt.Sprintf("Action failed: %s %s", action.GetType(), label)
+	}
+	var actionTS time.Time
+	if action.GetStartTime() != nil {
+		actionTS = action.GetStartTime().AsTime()
+	}
+	tb.emitLog(ctx, state, invocationID, "bazel.action.completed",
+		body, severity, actionTS,
+		map[string]string{
+			"bazel.action.mnemonic": action.GetType(),
+			"bazel.target.label":    label,
+		},
+	)
+
+	return nil
+}
+
+func (tb *TraceBuilder) handleTestResult(ctx context.Context, invocations map[string]*invocationState, invocationID string, eventID *bep.BuildEventId, result *bep.TestResult) error {
+	state := invocations[invocationID]
+	if state == nil {
+		return nil
+	}
+
+	tr := eventID.GetTestResult()
+	label := ""
+	configID := ""
+	if tr != nil {
+		label = tr.GetLabel()
+		configID = tr.GetConfiguration().GetId()
+	}
+
+	state.addTestResult(label, configID, tr, result)
+
+	severity := plog.SeverityNumberInfo
+	body := fmt.Sprintf("Test passed: %s", label)
+	if result.GetStatus() != bep.TestStatus_PASSED {
+		severity = plog.SeverityNumberError
+		body = fmt.Sprintf("Test failed: %s", label)
+	}
+	var testTS time.Time
+	if result.GetTestAttemptStart() != nil {
+		testTS = result.GetTestAttemptStart().AsTime()
+	}
+	tb.emitLog(ctx, state, invocationID, "bazel.test.result",
+		body, severity, testTS,
+		map[string]string{
+			"bazel.test.status":  result.GetStatus().String(),
+			"bazel.target.label": label,
+		},
+	)
+
+	return nil
+}
+
+func (tb *TraceBuilder) handleBuildFinished(ctx context.Context, invocations map[string]*invocationState, invocationID string, finished *bep.BuildFinished) error {
+	state := invocations[invocationID]
+	if state == nil {
+		return nil
+	}
+
+	traces, ok := state.finalize(finished)
+	if !ok {
+		return nil
+	}
+
+	tb.logger.Debug("Build finished",
+		zap.String("invocation_id", invocationID),
+		zap.String("exit_code", finished.GetExitCode().GetName()),
+		zap.Int32("code", finished.GetExitCode().GetCode()),
+	)
+
+	severity := plog.SeverityNumberInfo
+	body := fmt.Sprintf("Build finished: %s", finished.GetExitCode().GetName())
+	if finished.GetExitCode().GetCode() != 0 {
+		severity = plog.SeverityNumberError
+	}
+	var finishTS time.Time
+	if finished.GetFinishTime() != nil {
+		finishTS = finished.GetFinishTime().AsTime()
+	}
+	tb.emitLog(ctx, state, invocationID, "bazel.build.finished",
+		body, severity, finishTS,
+		map[string]string{
+			"bazel.exit_code.name": finished.GetExitCode().GetName(),
+		},
+	)
+
+	// Don't delete state yet — BuildMetrics may arrive after BuildFinished.
+	// State cleanup is handled by handleBuildMetrics or the stale invocation reaper.
+	return tb.consumeAndRecord(ctx, traces)
+}
+
+func (tb *TraceBuilder) handleBuildMetrics(ctx context.Context, invocations map[string]*invocationState, invocationID string, metrics *bep.BuildMetrics) error {
+	state := invocations[invocationID]
+	if state == nil {
+		return nil
+	}
+
+	traces := state.buildMetricsSpan(metrics)
+
+	tb.emitLog(ctx, state, invocationID, "bazel.build.metrics",
+		"Build metrics",
+		plog.SeverityNumberInfo, time.Time{},
+		nil,
+	)
+
+	// BuildMetrics is typically the last event in the BEP stream.
+	// Clean up invocation state after consuming traces.
+	err := tb.consumeAndRecord(ctx, traces)
+	delete(invocations, invocationID)
+	tb.activeInvocations.Add(ctx, -1)
+	return err
+}
+
+// consumeAndRecord forwards traces to the next consumer and records an error metric on failure.
+func (tb *TraceBuilder) consumeAndRecord(ctx context.Context, traces ptrace.Traces) error {
+	if tb.tracesConsumer == nil {
+		return nil
+	}
+	err := tb.tracesConsumer.ConsumeTraces(ctx, traces)
+	if err != nil {
+		errorType := "retryable"
+		if consumererror.IsPermanent(err) {
+			errorType = "permanent"
+		}
+		tb.consumerErrors.Add(ctx, 1, metric.WithAttributes(
+			attribute.String("error_type", errorType),
+		))
+		return fmt.Errorf("consuming traces: %w", err)
+	}
+	return nil
+}
+
+// emitLog creates and sends a single log record for a BEP event.
+// It is a no-op if logsConsumer is nil. Errors are logged but not propagated,
+// since traces remain the primary signal.
+func (tb *TraceBuilder) emitLog(ctx context.Context, state *invocationState, invocationID, eventName, body string, severity plog.SeverityNumber, ts time.Time, attrs map[string]string) {
+	if tb.logsConsumer == nil {
+		return
+	}
+
+	logs := plog.NewLogs()
+	rl := logs.ResourceLogs().AppendEmpty()
+	rl.Resource().Attributes().PutStr("service.name", "bazel")
+	sl := rl.ScopeLogs().AppendEmpty()
+	sl.Scope().SetName("besreceiver")
+
+	lr := sl.LogRecords().AppendEmpty()
+	if !ts.IsZero() {
+		lr.SetTimestamp(pcommon.NewTimestampFromTime(ts))
+	}
+	lr.SetSeverityNumber(severity)
+	lr.SetSeverityText(severity.String())
+	lr.Body().SetStr(body)
+
+	lr.Attributes().PutStr("event.name", eventName)
+	lr.Attributes().PutStr("bazel.invocation_id", invocationID)
+
+	if state != nil {
+		lr.SetTraceID(state.traceID)
+	}
+
+	for k, v := range attrs {
+		lr.Attributes().PutStr(k, v)
+	}
+
+	if err := tb.logsConsumer.ConsumeLogs(ctx, logs); err != nil {
+		tb.logger.Warn("Failed to emit log record",
+			zap.String("event_name", eventName),
+			zap.String("invocation_id", invocationID),
+			zap.Error(err),
+		)
+	}
+}
+
+// reapStale scans all invocations and deletes any that exceed invocationTimeout,
+// flushing pending spans before deletion.
+func (tb *TraceBuilder) reapStale(invocations map[string]*invocationState, now time.Time) {
+	for invID, state := range invocations {
+		if now.Sub(state.createdAt) <= tb.invocationTimeout {
+			continue
+		}
+		if traces, ok := state.flushOrphaned(); ok && tb.tracesConsumer != nil {
+			if err := tb.tracesConsumer.ConsumeTraces(context.Background(), traces); err != nil {
+				tb.logger.Error("Failed to flush orphaned spans",
+					zap.String("invocation_id", invID),
+					zap.Error(err),
+				)
+			}
+		}
+		delete(invocations, invID)
+		tb.invocationsReaped.Add(context.Background(), 1)
+		tb.activeInvocations.Add(context.Background(), -1)
+		tb.logger.Warn("Reaped stale invocation",
+			zap.String("invocation_id", invID),
+			zap.Duration("age", now.Sub(state.createdAt)),
+		)
+	}
+}
+
+// traceIDFromUUID deterministically derives a TraceID from a Bazel invocation UUID.
+func traceIDFromUUID(uuid string) pcommon.TraceID {
+	h := sha256.Sum256([]byte(uuid))
+	var tid pcommon.TraceID
+	copy(tid[:], h[:16])
+	return tid
+}
+
+func newSpanID() pcommon.SpanID {
+	var sid pcommon.SpanID
+	_, _ = rand.Read(sid[:])
+	return sid
+}
+
+// targetKey builds the lookup key for the targets map.
+func targetKey(label, configID string) string {
+	return label + "\x00" + configID
+}

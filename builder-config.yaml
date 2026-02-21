@@ -1,0 +1,20 @@
+dist:
+  name: otelcol-bazel
+  module: github.com/chagui/besreceiver/otelcol-bazel
+  output_path: ./build
+
+receivers:
+  - gomod: "github.com/chagui/besreceiver v0.1.0"
+    import: "github.com/chagui/besreceiver/receiver/besreceiver"
+    path: "."
+
+exporters:
+  - gomod: go.opentelemetry.io/collector/exporter/otlpexporter v0.146.1
+  - gomod: go.opentelemetry.io/collector/exporter/debugexporter v0.146.1
+
+processors:
+  - gomod: go.opentelemetry.io/collector/processor/batchprocessor v0.146.1
+  - gomod: go.opentelemetry.io/collector/processor/memorylimiterprocessor v0.146.1
+
+extensions:
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/extension/healthcheckextension v0.146.0

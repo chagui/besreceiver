@@ -1,0 +1,16 @@
+.git/
+.github/
+.idea/
+.vscode/
+build/
+docs/
+tmp/
+coverage.out
+*.test
+*.prof
+*.swp
+*.swo
+*~
+CLAUDE.md
+.DS_Store
+Thumbs.db

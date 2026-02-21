@@ -1,0 +1,323 @@
+version: "2"
+
+run:
+  timeout: 5m
+  modules-download-mode: readonly
+  tests: true
+
+formatters:
+  enable:
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/chagui/besreceiver
+
+linters:
+  default: none
+  enable:
+    # Bug detection & safety
+    - asasalint
+    - bodyclose
+    - contextcheck
+    - durationcheck
+    - errcheck
+    - errchkjson
+    - musttag
+    - nilerr
+    - nilnesserr
+    - nilnil
+    - noctx
+    - rowserrcheck
+    - spancheck
+    - sqlclosecheck
+
+    # Error handling
+    - errorlint
+    - wrapcheck
+
+    # Style & code quality
+    - asciicheck
+    - bidichk
+    - canonicalheader
+    - copyloopvar
+    - dupword
+    - embeddedstructfieldcheck
+    - errname
+    - exhaustive
+    - fatcontext
+    - godot
+    - goprintffuncname
+    - intrange
+    - mirror
+    - nakedret
+    - nonamedreturns
+    - nolintlint
+    - nosprintfhostport
+    - perfsprint
+    - predeclared
+    - protogetter
+    - reassign
+    - recvcheck
+    - unconvert
+    - usestdlibvars
+    - usetesting
+    - whitespace
+
+    # Modernization
+    - exptostd
+    - modernize
+
+    # Complexity
+    - cyclop
+    - funlen
+    - gocognit
+    - gocyclo
+    - nestif
+
+    # Multi-purpose static analysis
+    - goconst
+    - gocritic
+    - gosec
+    - govet
+    - ineffassign
+    - misspell
+    - revive
+    - staticcheck
+    - unparam
+    - unused
+    - wastedassign
+
+    # Constants & globals
+    - gochecknoglobals
+    - gochecknoinits
+    - gocheckcompilerdirectives
+    - mnd
+
+    # Interface patterns
+    - iface
+    - interfacebloat
+
+    # Module management
+    - gomoddirectives
+
+    # Concurrency
+    - containedctx
+
+    # Testing
+    - tparallel
+    - testableexamples
+
+    # Logging
+    - sloglint
+
+    # Code duplication
+    - dupl
+
+  settings:
+    cyclop:
+      max-complexity: 20
+      package-average: 10.0
+
+    errcheck:
+      check-type-assertions: true
+      check-blank: true
+
+    errorlint:
+      errorf: true
+      asserts: true
+      comparison: true
+
+    exhaustive:
+      check:
+        - switch
+        - map
+      default-signifies-exhaustive: false
+
+    funlen:
+      lines: 100
+      statements: 50
+
+    gocognit:
+      min-complexity: 20
+
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - style
+        - performance
+        - experimental
+        - opinionated
+      settings:
+        captLocal:
+          paramsOnly: false
+        hugeParam:
+          sizeThreshold: 80
+        rangeExprCopy:
+          sizeThreshold: 512
+        rangeValCopy:
+          sizeThreshold: 128
+
+    gocyclo:
+      min-complexity: 15
+
+    govet:
+      enable-all: true
+      disable:
+        - fieldalignment
+      settings:
+        shadow:
+          strict: true
+
+    interfacebloat:
+      max: 5
+
+    mnd:
+      ignored-functions:
+        - os.Chmod
+        - os.Mkdir.*
+        - os.OpenFile
+        - os.WriteFile
+        - strconv.*
+        - make
+
+    nakedret:
+      max-func-lines: 0
+
+    nestif:
+      min-complexity: 5
+
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+
+    perfsprint:
+      strconcat: false
+
+    reassign:
+      patterns:
+        - ".*"
+
+    revive:
+      enable-default-rules: true
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: dot-imports
+        - name: error-return
+        - name: error-strings
+        - name: error-naming
+        - name: exported
+        - name: increment-decrement
+        - name: var-naming
+        - name: var-declaration
+        - name: range
+        - name: receiver-naming
+        - name: time-naming
+        - name: unexported-return
+        - name: indent-error-flow
+        - name: errorf
+        - name: empty-block
+        - name: superfluous-else
+        - name: unused-parameter
+        - name: unreachable-code
+        - name: redefines-builtin-id
+        - name: waitgroup-by-value
+        - name: unconditional-recursion
+        - name: string-of-int
+        - name: early-return
+        - name: defer
+        - name: identical-branches
+        - name: modifies-value-receiver
+        - name: confusing-naming
+        - name: use-any
+
+    sloglint:
+      no-global: all
+      context: scope
+
+    spancheck:
+      checks:
+        - end
+        - record-error
+        - set-status
+
+    staticcheck:
+      checks:
+        - all
+
+    usetesting:
+      os-temp-dir: true
+
+    gomoddirectives:
+      replace-local: true
+
+    wrapcheck:
+      ignore-package-globs:
+        - go.opentelemetry.io/collector/consumer/consumererror
+
+  exclusions:
+    warn-unused: true
+    presets:
+      - std-error-handling
+      - common-false-positives
+    rules:
+      - path: '_test\.go'
+        linters:
+          - bodyclose
+          - containedctx
+          - dupl
+          - errcheck
+          - exhaustive
+          - funlen
+          - gochecknoglobals
+          - gocognit
+          - goconst
+          - gocyclo
+          - gosec
+          - mnd
+          - noctx
+          - unparam
+          - wrapcheck
+      - path: '_test\.go'
+        text: 'shadow'
+        linters:
+          - govet
+      # Factory globals are the standard OTel Collector pattern.
+      - path: 'factory\.go'
+        linters:
+          - gochecknoglobals
+      # mdatagen generated globals (Type, ScopeName).
+      - path: 'internal/metadata/generated_.*\.go'
+        linters:
+          - gochecknoglobals
+      # receiver.Settings is an OTel API type (160 bytes) — cannot be changed to pointer.
+      - path: 'factory\.go'
+        text: 'hugeParam'
+        linters:
+          - gocritic
+      # eventMsg carries a context through a channel — intentional, not a "contained context".
+      - path: 'tracebuilder\.go'
+        text: 'found a struct that contains a context.Context field'
+        linters:
+          - containedctx
+      # TraceBuilder.Start launches a long-lived goroutine; context is passed per-event.
+      - path: 'receiver\.go'
+        text: 'should pass the context parameter'
+        linters:
+          - contextcheck
+      # OTel Meter API calls only fail for invalid names (ours are hardcoded literals).
+      - text: 'Error return value of `meter\.'
+        linters:
+          - errcheck
+      # crypto/rand.Read never returns an error on modern Go.
+      - text: 'Error return value of `rand\.Read'
+        linters:
+          - errcheck
+
+output:
+  sort-order:
+    - linter
+    - file
+  show-stats: true

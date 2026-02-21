@@ -1,0 +1,17 @@
+version: v2
+modules:
+  - path: third_party/bazel/protobuf
+lint:
+  use:
+    - STANDARD
+  except:
+    - PACKAGE_DIRECTORY_MATCH
+    - PACKAGE_SAME_DIRECTORY
+    - ENUM_VALUE_PREFIX
+    - ENUM_ZERO_VALUE_SUFFIX
+    - FIELD_NOT_REQUIRED
+    - IMPORT_USED
+    - PACKAGE_VERSION_SUFFIX
+breaking:
+  use:
+    - FILE
