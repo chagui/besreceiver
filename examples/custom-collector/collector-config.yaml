@@ -1,0 +1,32 @@
+extensions:
+  health_check:
+    endpoint: "0.0.0.0:13133"
+
+receivers:
+  bes:
+    endpoint: "0.0.0.0:8082"
+
+processors:
+  batch:
+    send_batch_size: 8192
+    timeout: 200ms
+
+exporters:
+  # Replace with your own exporter (otlp, datadog, jaeger, etc.)
+  debug:
+    verbosity: detailed
+
+service:
+  extensions: [health_check]
+  telemetry:
+    logs:
+      level: info
+  pipelines:
+    traces:
+      receivers: [bes]
+      processors: [batch]
+      exporters: [debug]
+    logs:
+      receivers: [bes]
+      processors: [batch]
+      exporters: [debug]

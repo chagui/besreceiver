@@ -1,0 +1,6 @@
+services:
+  collector:
+    build: .
+    ports:
+      - "8082:8082"   # BES gRPC
+      - "13133:13133" # Health check
