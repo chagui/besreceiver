@@ -1,0 +1,11 @@
+root = "."
+tmp_dir = "build"
+
+[build]
+cmd = "builder --config builder-config.yaml"
+entrypoint = "build/otelcol-bazel"
+args_bin = ["--config", "/etc/otelcol-bazel/config.yaml"]
+include_ext = ["go", "yaml"]
+include_dir = ["receiver", "internal"]
+exclude_dir = ["build", "third_party", "examples"]
+kill_delay = "1s"

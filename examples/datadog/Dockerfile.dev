@@ -1,0 +1,10 @@
+FROM golang:1.26
+
+RUN go install go.opentelemetry.io/collector/cmd/builder@v0.146.1 && \
+    go install github.com/air-verse/air@latest
+
+WORKDIR /src/besreceiver
+
+EXPOSE 8082
+
+CMD ["air", "-c", ".air.toml"]

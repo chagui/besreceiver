@@ -1,4 +1,5 @@
-.PHONY: all build test test-short test-cover test-bench lint vet clean fuzz fix generate ocb ci docker
+.PHONY: all build test test-short test-cover test-bench lint vet clean fuzz fix generate ocb ci docker \
+       compose-build compose-up compose-down compose-clean example agent-status
 
 # Use absolute path: GNU Make 3.81 (macOS default) doesn't propagate export PATH to recipe shells.
 GOTESTSUM := $(shell go env GOPATH)/bin/gotestsum
@@ -66,3 +67,31 @@ ci: vet lint test build
 ## docker: Build the Docker image
 docker:
 	docker build -t otelcol-bazel:latest .
+
+COMPOSE := docker compose -f examples/datadog/docker-compose.yaml
+
+## compose-build: Build the dev Compose images
+compose-build:
+	$(COMPOSE) build
+
+## compose-up: Start the Datadog example stack (with live reload)
+compose-up:
+	$(COMPOSE) up --build -d
+
+## compose-down: Stop the Datadog example stack
+compose-down:
+	$(COMPOSE) down
+
+## compose-clean: Stop the stack and remove volumes
+compose-clean:
+	$(COMPOSE) down -v
+
+## example: Run the full Datadog example end-to-end
+example: compose-up
+	@echo "Waiting for collector to be ready..."
+	@until wget -q --spider http://localhost:13133 2>/dev/null; do sleep 2; done
+	cd examples/bazel-project && bazel test //... --bes_backend=grpc://localhost:8082
+
+## agent-status: Show Datadog Agent status
+agent-status:
+	$(COMPOSE) exec dd-agent agent status

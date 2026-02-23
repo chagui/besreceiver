@@ -1,0 +1,30 @@
+services:
+  dd-agent:
+    container_name: dd-agent
+    image: gcr.io/datadoghq/agent:7
+    volumes:
+      - ./datadog.yaml:/etc/datadog-agent/datadog.yaml:ro
+    env_file: .env
+    environment:
+      - DD_HOSTNAME=besreceiver-dev
+      - DD_APM_ENABLED=true
+
+  otelcol-bazel:
+    build:
+      context: ../..
+      dockerfile: examples/datadog/Dockerfile.dev
+    volumes:
+      - ../..:/src/besreceiver
+      - ./collector-config.yaml:/etc/otelcol-bazel/config.yaml:ro
+      - gomodcache:/go/pkg/mod
+      - gobuildcache:/root/.cache/go-build
+    ports:
+      - "8082:8082"
+      - "13133:13133"
+    stop_grace_period: 3s
+    depends_on:
+      - dd-agent
+
+volumes:
+  gomodcache:
+  gobuildcache:
