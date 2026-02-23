@@ -85,24 +85,3 @@ graph TD
     T2 --> TR1
     T2 --> TR2
 ```
-
-## Deployment
-
-```mermaid
-graph TD
-    subgraph "Kubernetes"
-        subgraph "Deployment: otelcol-bazel"
-            POD[Pod<br/>otelcol-bazel:latest<br/>distroless/static]
-            SVC[Service<br/>:8082 gRPC]
-        end
-        subgraph "DaemonSet: datadog-agent"
-            DDA[Datadog Agent<br/>OTLP intake :4317]
-        end
-    end
-
-    SVC --> POD
-    POD -- "OTLP" --> DDA
-    DDA -- "HTTPS" --> DDBE[Datadog Backend]
-
-    BAZEL[Bazel clients<br/>--bes_backend] --> SVC
-```
