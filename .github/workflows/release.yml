@@ -81,7 +81,10 @@ jobs:
           CGO_ENABLED: "0"
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
-        run: go build -trimpath -ldflags='-s -w' -o otelcol-bazel ./build/
+        run: |
+          cd build
+          go mod edit -replace "github.com/chagui/besreceiver=.."
+          go build -trimpath -ldflags='-s -w' -o ../otelcol-bazel .
 
       - name: Package archive
         run: |
