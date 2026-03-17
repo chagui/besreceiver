@@ -49,6 +49,7 @@ func (r *besReceiver) Start(ctx context.Context, host component.Host) error {
 		r.grpcServer, err = r.config.ToServer(ctx, host.GetExtensions(), r.settings.TelemetrySettings)
 		if err != nil {
 			r.traceBuilder.Stop()
+			r.traceBuilder = nil
 			startErr = fmt.Errorf("failed to create gRPC server: %w", err)
 			return
 		}
@@ -58,6 +59,7 @@ func (r *besReceiver) Start(ctx context.Context, host component.Host) error {
 		r.listener, err = r.config.NetAddr.Listen(ctx)
 		if err != nil {
 			r.traceBuilder.Stop()
+			r.traceBuilder = nil
 			startErr = fmt.Errorf("failed to listen on %s: %w", r.config.NetAddr.Endpoint, err)
 			return
 		}
@@ -69,6 +71,13 @@ func (r *besReceiver) Start(ctx context.Context, host component.Host) error {
 			}
 		}()
 	})
+
+	if startErr != nil {
+		r.refCount.Add(-1)
+		sharedReceiversMu.Lock()
+		delete(sharedReceivers, r.config.NetAddr.Endpoint)
+		sharedReceiversMu.Unlock()
+	}
 
 	return startErr
 }
