@@ -6,3 +6,7 @@ status:
     alpha: [traces, logs]
   codeowners:
     active: [chagui]
+
+tests:
+  config:
+    endpoint: localhost:0

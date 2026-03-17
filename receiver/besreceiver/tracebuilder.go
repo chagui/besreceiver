@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"fmt"
+	"sync"
 	"time"
 
 	"go.opentelemetry.io/collector/consumer"
@@ -53,6 +54,7 @@ type TraceBuilder struct {
 	eventCh           chan eventMsg
 	stopCh            chan struct{}
 	doneCh            chan struct{}
+	stopOnce          sync.Once
 
 	// Internal metrics for observability.
 	activeInvocations metric.Int64UpDownCounter
@@ -109,9 +111,14 @@ func (tb *TraceBuilder) Start() {
 }
 
 // Stop signals the owner goroutine to exit and waits for it to finish.
+// It is safe to call multiple times.
 func (tb *TraceBuilder) Stop() {
-	if tb.stopCh != nil {
-		close(tb.stopCh)
+	tb.stopOnce.Do(func() {
+		if tb.stopCh != nil {
+			close(tb.stopCh)
+		}
+	})
+	if tb.doneCh != nil {
 		<-tb.doneCh
 	}
 }
