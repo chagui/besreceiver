@@ -61,6 +61,59 @@ func addMemoryGauges(sm pmetric.ScopeMetrics, mm *bep.BuildMetrics_MemoryMetrics
 	addGaugeInt64(sm, "bazel.invocation.memory.peak_post_gc_heap", "By", "Peak JVM heap size post GC", ts, mm.GetPeakPostGcHeapSize(), attrs)
 }
 
+// cumulativeCounters tracks running totals across invocations.
+// All fields are owned by the TraceBuilder's run goroutine — no mutex needed.
+type cumulativeCounters struct {
+	totalWallTimeMs      int64
+	totalCPUTimeMs       int64
+	totalActionsCreated  int64
+	totalActionsExecuted int64
+	totalInvocations     int64
+	startTime            pcommon.Timestamp
+}
+
+func newCumulativeCounters(startTime pcommon.Timestamp) *cumulativeCounters {
+	return &cumulativeCounters{startTime: startTime}
+}
+
+// record increments running totals from a BuildMetrics event.
+func (c *cumulativeCounters) record(metrics *bep.BuildMetrics) {
+	c.totalInvocations++
+	if tm := metrics.GetTimingMetrics(); tm != nil {
+		c.totalWallTimeMs += tm.GetWallTimeInMs()
+		c.totalCPUTimeMs += tm.GetCpuTimeInMs()
+	}
+	if as := metrics.GetActionSummary(); as != nil {
+		c.totalActionsCreated += as.GetActionsCreated()
+		c.totalActionsExecuted += as.GetActionsExecuted()
+	}
+}
+
+// appendTo appends cumulative Sum data points to the given ScopeMetrics.
+func (c *cumulativeCounters) appendTo(sm pmetric.ScopeMetrics, ts pcommon.Timestamp) {
+	addSumInt64(sm, "bazel.invocation.count", "{invocation}", "Total BuildMetrics events processed", ts, c.startTime, c.totalInvocations)
+	addSumInt64(sm, "bazel.invocation.wall_time.total", "ms", "Cumulative wall time across invocations", ts, c.startTime, c.totalWallTimeMs)
+	addSumInt64(sm, "bazel.invocation.cpu_time.total", "ms", "Cumulative CPU time across invocations", ts, c.startTime, c.totalCPUTimeMs)
+	addSumInt64(sm, "bazel.invocation.actions_created.total", "{action}", "Cumulative actions created across invocations", ts, c.startTime, c.totalActionsCreated)
+	addSumInt64(sm, "bazel.invocation.actions_executed.total", "{action}", "Cumulative actions executed across invocations", ts, c.startTime, c.totalActionsExecuted)
+}
+
+// addSumInt64 appends a single monotonic cumulative Sum metric with one Int64 data point.
+func addSumInt64(sm pmetric.ScopeMetrics, name, unit, description string, ts, startTS pcommon.Timestamp, value int64) {
+	m := sm.Metrics().AppendEmpty()
+	m.SetName(name)
+	m.SetUnit(unit)
+	m.SetDescription(description)
+	sum := m.SetEmptySum()
+	sum.SetIsMonotonic(true)
+	sum.SetAggregationTemporality(pmetric.AggregationTemporalityCumulative)
+
+	dp := sum.DataPoints().AppendEmpty()
+	dp.SetTimestamp(ts)
+	dp.SetStartTimestamp(startTS)
+	dp.SetIntValue(value)
+}
+
 // addGaugeInt64 appends a single Gauge metric with one Int64 data point.
 func addGaugeInt64(sm pmetric.ScopeMetrics, name, unit, description string, ts pcommon.Timestamp, value int64, attrs pcommon.Map) {
 	m := sm.Metrics().AppendEmpty()

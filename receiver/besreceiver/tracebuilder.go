@@ -59,6 +59,9 @@ type TraceBuilder struct {
 	doneCh            chan struct{}
 	stopOnce          sync.Once
 
+	// Cumulative counters for cross-invocation metrics.
+	counters *cumulativeCounters
+
 	// Internal metrics for observability.
 	activeInvocations metric.Int64UpDownCounter
 	eventsProcessed   metric.Int64Counter
@@ -93,12 +96,13 @@ func NewTraceBuilder(tracesConsumer consumer.Traces, logsConsumer consumer.Logs,
 		metric.WithDescription("Total errors from the traces consumer"),
 	)
 	return &TraceBuilder{
-		tracesConsumer:  tracesConsumer,
-		logsConsumer:    logsConsumer,
-		metricsConsumer: metricsConsumer,
-		logger:          logger,
+		tracesConsumer:    tracesConsumer,
+		logsConsumer:      logsConsumer,
+		metricsConsumer:   metricsConsumer,
+		logger:            logger,
 		invocationTimeout: cfg.InvocationTimeout,
 		reaperInterval:    cfg.ReaperInterval,
+		counters:          newCumulativeCounters(pcommon.NewTimestampFromTime(time.Now())),
 		activeInvocations: activeInvocations,
 		eventsProcessed:   eventsProcessed,
 		invocationsReaped: invocationsReaped,
@@ -431,6 +435,11 @@ func (tb *TraceBuilder) handleBuildMetrics(ctx context.Context, invocations map[
 
 	ts := pcommon.NewTimestampFromTime(time.Now())
 	md := buildInvocationGauges(invocationID, state, metrics, ts)
+
+	// Update cumulative counters and merge into the same metrics payload.
+	tb.counters.record(metrics)
+	sm := md.ResourceMetrics().At(0).ScopeMetrics().At(0)
+	tb.counters.appendTo(sm, ts)
 
 	// BuildMetrics is typically the last event in the BEP stream.
 	// Clean up invocation state after consuming traces.
