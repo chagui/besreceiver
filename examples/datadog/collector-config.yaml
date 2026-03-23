@@ -38,6 +38,7 @@ service:
   telemetry:
     logs:
       level: info
+      output_paths: ["stdout", "/var/log/otelcol/collector.log"]
       encoding: ${env:OTEL_LOG_ENCODING}
     metrics:
       readers:
