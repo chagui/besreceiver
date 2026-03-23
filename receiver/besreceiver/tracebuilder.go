@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"go.opentelemetry.io/collector/consumer/consumererror"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/plog"
+	"go.opentelemetry.io/collector/pdata/pmetric"
 	"go.opentelemetry.io/collector/pdata/ptrace"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -427,12 +429,16 @@ func (tb *TraceBuilder) handleBuildMetrics(ctx context.Context, invocations map[
 		nil,
 	)
 
+	ts := pcommon.NewTimestampFromTime(time.Now())
+	md := buildInvocationGauges(invocationID, state, metrics, ts)
+
 	// BuildMetrics is typically the last event in the BEP stream.
 	// Clean up invocation state after consuming traces.
-	err := tb.consumeAndRecord(ctx, traces)
+	tracesErr := tb.consumeAndRecord(ctx, traces)
+	metricsErr := tb.consumeMetrics(ctx, md)
 	delete(invocations, invocationID)
 	tb.activeInvocations.Add(ctx, -1)
-	return err
+	return errors.Join(tracesErr, metricsErr)
 }
 
 // consumeAndRecord forwards traces to the next consumer and records an error metric on failure.
@@ -450,6 +456,20 @@ func (tb *TraceBuilder) consumeAndRecord(ctx context.Context, traces ptrace.Trac
 			attribute.String("error_type", errorType),
 		))
 		return fmt.Errorf("consuming traces: %w", err)
+	}
+	return nil
+}
+
+// consumeMetrics forwards metrics to the next consumer. No-op if metricsConsumer is nil.
+func (tb *TraceBuilder) consumeMetrics(ctx context.Context, md pmetric.Metrics) error {
+	if tb.metricsConsumer == nil {
+		return nil
+	}
+	if md.MetricCount() == 0 {
+		return nil
+	}
+	if err := tb.metricsConsumer.ConsumeMetrics(ctx, md); err != nil {
+		return fmt.Errorf("consuming metrics: %w", err)
 	}
 	return nil
 }
