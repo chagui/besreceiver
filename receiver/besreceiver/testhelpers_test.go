@@ -250,3 +250,24 @@ func makeBuildFinishedReq(t testing.TB, invID string, seqNum int64, code int32, 
 		},
 	})
 }
+
+func makeBuildMetricsReq(t testing.TB, invID string, seqNum, wallMs, cpuMs int64) *pb.PublishBuildToolEventStreamRequest {
+	t.Helper()
+	return makeBESRequest(t, invID, seqNum, &bep.BuildEvent{
+		Id: &bep.BuildEventId{
+			Id: &bep.BuildEventId_BuildMetrics{BuildMetrics: &bep.BuildEventId_BuildMetricsId{}},
+		},
+		Payload: &bep.BuildEvent_BuildMetrics{
+			BuildMetrics: &bep.BuildMetrics{
+				TimingMetrics: &bep.BuildMetrics_TimingMetrics{
+					WallTimeInMs: wallMs,
+					CpuTimeInMs:  cpuMs,
+				},
+				ActionSummary: &bep.BuildMetrics_ActionSummary{
+					ActionsCreated:  100,
+					ActionsExecuted: 80,
+				},
+			},
+		},
+	})
+}
