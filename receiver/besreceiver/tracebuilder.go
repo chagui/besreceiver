@@ -43,11 +43,12 @@ type TraceBuilderConfig struct {
 	MeterProvider     metric.MeterProvider
 }
 
-// TraceBuilder converts BEP events into OTel trace spans and log records.
+// TraceBuilder converts BEP events into OTel traces, logs, and metrics.
 // All invocation state is owned by a single goroutine started via Start().
 type TraceBuilder struct {
 	tracesConsumer    consumer.Traces
 	logsConsumer      consumer.Logs
+	metricsConsumer   consumer.Metrics
 	logger            *zap.Logger
 	invocationTimeout time.Duration
 	reaperInterval    time.Duration
@@ -64,9 +65,9 @@ type TraceBuilder struct {
 }
 
 // NewTraceBuilder creates a new TraceBuilder.
-// Either consumer may be nil if only one signal is configured.
+// Any consumer may be nil if that signal is not configured.
 // Zero-value fields in cfg get sensible defaults.
-func NewTraceBuilder(tracesConsumer consumer.Traces, logsConsumer consumer.Logs, logger *zap.Logger, cfg TraceBuilderConfig) *TraceBuilder {
+func NewTraceBuilder(tracesConsumer consumer.Traces, logsConsumer consumer.Logs, metricsConsumer consumer.Metrics, logger *zap.Logger, cfg TraceBuilderConfig) *TraceBuilder {
 	if cfg.InvocationTimeout <= 0 {
 		cfg.InvocationTimeout = defaultInvocationTimeout
 	}
@@ -90,9 +91,10 @@ func NewTraceBuilder(tracesConsumer consumer.Traces, logsConsumer consumer.Logs,
 		metric.WithDescription("Total errors from the traces consumer"),
 	)
 	return &TraceBuilder{
-		tracesConsumer:    tracesConsumer,
-		logsConsumer:      logsConsumer,
-		logger:            logger,
+		tracesConsumer:  tracesConsumer,
+		logsConsumer:    logsConsumer,
+		metricsConsumer: metricsConsumer,
+		logger:          logger,
 		invocationTimeout: cfg.InvocationTimeout,
 		reaperInterval:    cfg.ReaperInterval,
 		activeInvocations: activeInvocations,

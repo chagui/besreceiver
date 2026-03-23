@@ -25,7 +25,7 @@ import (
 
 func TestPublishBuildToolEventStream_HappyPath(t *testing.T) {
 	sink := new(consumertest.TracesSink)
-	tb := NewTraceBuilder(sink, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
 	tb.Start()
 	defer tb.Stop()
 	r := &besReceiver{
@@ -70,7 +70,7 @@ func TestPublishBuildToolEventStream_EmptyStream(t *testing.T) {
 	sink := new(consumertest.TracesSink)
 	r := &besReceiver{
 		logger:       zap.NewNop(),
-		traceBuilder: NewTraceBuilder(sink, nil, zap.NewNop(), TraceBuilderConfig{}),
+		traceBuilder: NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{}),
 	}
 
 	stream := &mockBESStream{
@@ -88,7 +88,7 @@ func TestPublishBuildToolEventStream_EmptyStream(t *testing.T) {
 
 func TestPublishBuildToolEventStream_SendError(t *testing.T) {
 	sink := new(consumertest.TracesSink)
-	tb := NewTraceBuilder(sink, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
 	tb.Start()
 	defer tb.Stop()
 	r := &besReceiver{
@@ -116,7 +116,7 @@ func TestPublishBuildToolEventStream_SendError(t *testing.T) {
 func TestPublishBuildToolEventStream_RetryableConsumerError(t *testing.T) {
 	// A non-permanent consumer error should close the stream so Bazel retries.
 	errSink := consumertest.NewErr(errors.New("pipeline overloaded"))
-	tb := NewTraceBuilder(errSink, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb := NewTraceBuilder(errSink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
 	tb.Start()
 	defer tb.Stop()
 	r := &besReceiver{
@@ -148,7 +148,7 @@ func TestPublishBuildToolEventStream_PermanentConsumerError(t *testing.T) {
 	// A permanent consumer error should log but continue the stream.
 	permErr := consumererror.NewPermanent(errors.New("data rejected"))
 	errSink := consumertest.NewErr(permErr)
-	tb := NewTraceBuilder(errSink, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb := NewTraceBuilder(errSink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
 	tb.Start()
 	defer tb.Stop()
 	r := &besReceiver{
@@ -210,7 +210,7 @@ func TestShutdownRespectsContextDeadline(t *testing.T) {
 	sink := new(consumertest.TracesSink)
 	r := &besReceiver{
 		logger:       zap.NewNop(),
-		traceBuilder: NewTraceBuilder(sink, nil, zap.NewNop(), TraceBuilderConfig{}),
+		traceBuilder: NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{}),
 		grpcServer:   grpc.NewServer(),
 	}
 
@@ -229,7 +229,7 @@ func TestShutdownRespectsContextDeadline(t *testing.T) {
 
 func TestTraceBuilder_TargetConfiguredEmitsSpan(t *testing.T) {
 	sink := new(consumertest.TracesSink)
-	tb := NewTraceBuilder(sink, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
 	tb.Start()
 	defer tb.Stop()
 	ctx := context.Background()
@@ -297,7 +297,7 @@ func TestTraceBuilder_TargetConfiguredEmitsSpan(t *testing.T) {
 
 func TestTraceBuilder_BuildFinishedWithFailure(t *testing.T) {
 	sink := new(consumertest.TracesSink)
-	tb := NewTraceBuilder(sink, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
 	tb.Start()
 	defer tb.Stop()
 	ctx := context.Background()

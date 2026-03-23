@@ -17,7 +17,7 @@ import (
 
 func BenchmarkProcessOrderedBuildEvent(b *testing.B) {
 	sink := new(consumertest.TracesSink)
-	tb := NewTraceBuilder(sink, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
 	tb.Start()
 	defer tb.Stop()
 	ctx := context.Background()

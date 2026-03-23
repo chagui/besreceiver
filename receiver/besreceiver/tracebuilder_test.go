@@ -23,7 +23,7 @@ import (
 
 func TestTraceBuilder_BuildStarted(t *testing.T) {
 	sink := new(consumertest.TracesSink)
-	tb := NewTraceBuilder(sink, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
 	tb.Start()
 	defer tb.Stop()
 	ctx := context.Background()
@@ -59,7 +59,7 @@ func TestTraceBuilder_BuildStarted(t *testing.T) {
 
 func TestTraceBuilder_ActionExecuted(t *testing.T) {
 	sink := new(consumertest.TracesSink)
-	tb := NewTraceBuilder(sink, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
 	tb.Start()
 	defer tb.Stop()
 	ctx := context.Background()
@@ -111,7 +111,7 @@ func TestTraceBuilder_ActionExecuted(t *testing.T) {
 
 func TestTraceBuilder_BuildFinished(t *testing.T) {
 	sink := new(consumertest.TracesSink)
-	tb := NewTraceBuilder(sink, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
 	tb.Start()
 	defer tb.Stop()
 	ctx := context.Background()
@@ -169,7 +169,7 @@ func TestTraceBuilder_BuildFinished(t *testing.T) {
 
 func TestTraceBuilder_TestResult(t *testing.T) {
 	sink := new(consumertest.TracesSink)
-	tb := NewTraceBuilder(sink, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
 	tb.Start()
 	defer tb.Stop()
 	ctx := context.Background()
@@ -218,7 +218,7 @@ func TestTraceBuilder_TestResult(t *testing.T) {
 
 func TestTraceBuilder_ConcurrentInvocations(t *testing.T) {
 	sink := new(consumertest.TracesSink)
-	tb := NewTraceBuilder(sink, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
 	tb.Start()
 	defer tb.Stop()
 	ctx := context.Background()
@@ -255,7 +255,7 @@ func TestTraceBuilder_ConcurrentInvocations(t *testing.T) {
 
 func TestTraceBuilder_BuildMetricsDeletesState(t *testing.T) {
 	sink := new(consumertest.TracesSink)
-	tb := NewTraceBuilder(sink, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
 	tb.Start()
 	defer tb.Stop()
 	ctx := context.Background()
@@ -296,7 +296,7 @@ func TestTraceBuilder_BuildMetricsDeletesState(t *testing.T) {
 
 func TestTraceBuilder_ParseErrorIsPermanent(t *testing.T) {
 	sink := new(consumertest.TracesSink)
-	tb := NewTraceBuilder(sink, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
 	tb.Start()
 	defer tb.Stop()
 	ctx := context.Background()
@@ -329,7 +329,7 @@ func TestTraceBuilder_ParseErrorIsPermanent(t *testing.T) {
 
 func TestTraceBuilder_BatchFlushSingleConsumeCall(t *testing.T) {
 	sink := new(consumertest.TracesSink)
-	tb := NewTraceBuilder(sink, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
 	tb.Start()
 	defer tb.Stop()
 	ctx := context.Background()
@@ -454,7 +454,7 @@ func TestTraceBuilder_ConcurrentStreams(t *testing.T) {
 	}
 
 	sink := new(consumertest.TracesSink)
-	tb := NewTraceBuilder(sink, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
 	tb.Start()
 	defer tb.Stop()
 	ctx := context.Background()
@@ -501,7 +501,7 @@ func TestTraceBuilder_ConcurrentStreams(t *testing.T) {
 
 func TestTraceBuilder_EventBeforeBuildStarted(t *testing.T) {
 	sink := new(consumertest.TracesSink)
-	tb := NewTraceBuilder(sink, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
 	tb.Start()
 	defer tb.Stop()
 	ctx := context.Background()
@@ -528,7 +528,7 @@ func TestTraceBuilder_EventBeforeBuildStarted(t *testing.T) {
 
 func TestTraceBuilder_EventAfterStateCleanup(t *testing.T) {
 	sink := new(consumertest.TracesSink)
-	tb := NewTraceBuilder(sink, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
 	tb.Start()
 	defer tb.Stop()
 	ctx := context.Background()
@@ -561,7 +561,7 @@ func TestTraceBuilder_EventAfterStateCleanup(t *testing.T) {
 
 func TestReapStale(t *testing.T) {
 	sink := new(consumertest.TracesSink)
-	tb := NewTraceBuilder(sink, nil, zap.NewNop(), TraceBuilderConfig{
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{
 		InvocationTimeout: time.Nanosecond,
 		ReaperInterval:    time.Nanosecond,
 	})
@@ -662,7 +662,7 @@ func TestTargetKey_Uniqueness(t *testing.T) {
 func TestTraceBuilder_LogsEmitted(t *testing.T) {
 	tracesSink := new(consumertest.TracesSink)
 	logsSink := new(consumertest.LogsSink)
-	tb := NewTraceBuilder(tracesSink, logsSink, zap.NewNop(), TraceBuilderConfig{})
+	tb := NewTraceBuilder(tracesSink, logsSink, nil, zap.NewNop(), TraceBuilderConfig{})
 	tb.Start()
 	defer tb.Stop()
 	ctx := context.Background()
@@ -745,7 +745,7 @@ func TestTraceBuilder_LogsEmitted(t *testing.T) {
 
 func TestTraceBuilder_LogsOnly(t *testing.T) {
 	logsSink := new(consumertest.LogsSink)
-	tb := NewTraceBuilder(nil, logsSink, zap.NewNop(), TraceBuilderConfig{})
+	tb := NewTraceBuilder(nil, logsSink, nil, zap.NewNop(), TraceBuilderConfig{})
 	tb.Start()
 	defer tb.Stop()
 	ctx := context.Background()
@@ -765,7 +765,7 @@ func TestTraceBuilder_LogsOnly(t *testing.T) {
 
 func TestTraceBuilder_TracesOnly(t *testing.T) {
 	tracesSink := new(consumertest.TracesSink)
-	tb := NewTraceBuilder(tracesSink, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb := NewTraceBuilder(tracesSink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
 	tb.Start()
 	defer tb.Stop()
 	ctx := context.Background()
@@ -785,7 +785,7 @@ func TestTraceBuilder_TracesOnly(t *testing.T) {
 
 func TestTraceBuilder_LogSeverity(t *testing.T) {
 	logsSink := new(consumertest.LogsSink)
-	tb := NewTraceBuilder(nil, logsSink, zap.NewNop(), TraceBuilderConfig{})
+	tb := NewTraceBuilder(nil, logsSink, nil, zap.NewNop(), TraceBuilderConfig{})
 	tb.Start()
 	defer tb.Stop()
 	ctx := context.Background()
@@ -831,7 +831,7 @@ func TestTraceBuilder_LogConsumerErrorDoesNotBreakTraces(t *testing.T) {
 	tracesSink := new(consumertest.TracesSink)
 	errLogsSink := consumertest.NewErr(errors.New("logs pipeline overloaded"))
 
-	tb := NewTraceBuilder(tracesSink, errLogsSink, zap.NewNop(), TraceBuilderConfig{})
+	tb := NewTraceBuilder(tracesSink, errLogsSink, nil, zap.NewNop(), TraceBuilderConfig{})
 	tb.Start()
 	defer tb.Stop()
 	ctx := context.Background()
