@@ -38,6 +38,7 @@ service:
   telemetry:
     logs:
       level: info
+      encoding: ${env:OTEL_LOG_ENCODING}
     metrics:
       readers:
         - pull:
