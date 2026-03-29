@@ -54,3 +54,7 @@ service:
       receivers: [bes]
       processors: [memory_limiter, batch]
       exporters: [debug]
+    metrics:
+      receivers: [bes]
+      processors: [memory_limiter, batch]
+      exporters: [otlp_grpc/datadog, debug]

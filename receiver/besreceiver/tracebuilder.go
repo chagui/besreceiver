@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"go.opentelemetry.io/collector/consumer/consumererror"
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/plog"
+	"go.opentelemetry.io/collector/pdata/pmetric"
 	"go.opentelemetry.io/collector/pdata/ptrace"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
@@ -43,11 +45,12 @@ type TraceBuilderConfig struct {
 	MeterProvider     metric.MeterProvider
 }
 
-// TraceBuilder converts BEP events into OTel trace spans and log records.
+// TraceBuilder converts BEP events into OTel traces, logs, and metrics.
 // All invocation state is owned by a single goroutine started via Start().
 type TraceBuilder struct {
 	tracesConsumer    consumer.Traces
 	logsConsumer      consumer.Logs
+	metricsConsumer   consumer.Metrics
 	logger            *zap.Logger
 	invocationTimeout time.Duration
 	reaperInterval    time.Duration
@@ -55,6 +58,9 @@ type TraceBuilder struct {
 	stopCh            chan struct{}
 	doneCh            chan struct{}
 	stopOnce          sync.Once
+
+	// Cumulative counters for cross-invocation metrics.
+	counters *cumulativeCounters
 
 	// Internal metrics for observability.
 	activeInvocations metric.Int64UpDownCounter
@@ -64,9 +70,9 @@ type TraceBuilder struct {
 }
 
 // NewTraceBuilder creates a new TraceBuilder.
-// Either consumer may be nil if only one signal is configured.
+// Any consumer may be nil if that signal is not configured.
 // Zero-value fields in cfg get sensible defaults.
-func NewTraceBuilder(tracesConsumer consumer.Traces, logsConsumer consumer.Logs, logger *zap.Logger, cfg TraceBuilderConfig) *TraceBuilder {
+func NewTraceBuilder(tracesConsumer consumer.Traces, logsConsumer consumer.Logs, metricsConsumer consumer.Metrics, logger *zap.Logger, cfg TraceBuilderConfig) *TraceBuilder {
 	if cfg.InvocationTimeout <= 0 {
 		cfg.InvocationTimeout = defaultInvocationTimeout
 	}
@@ -92,9 +98,11 @@ func NewTraceBuilder(tracesConsumer consumer.Traces, logsConsumer consumer.Logs,
 	return &TraceBuilder{
 		tracesConsumer:    tracesConsumer,
 		logsConsumer:      logsConsumer,
+		metricsConsumer:   metricsConsumer,
 		logger:            logger,
 		invocationTimeout: cfg.InvocationTimeout,
 		reaperInterval:    cfg.ReaperInterval,
+		counters:          newCumulativeCounters(pcommon.NewTimestampFromTime(time.Now())),
 		activeInvocations: activeInvocations,
 		eventsProcessed:   eventsProcessed,
 		invocationsReaped: invocationsReaped,
@@ -425,12 +433,21 @@ func (tb *TraceBuilder) handleBuildMetrics(ctx context.Context, invocations map[
 		nil,
 	)
 
+	ts := pcommon.NewTimestampFromTime(time.Now())
+	md := buildInvocationGauges(invocationID, state, metrics, ts)
+
+	// Update cumulative counters and merge into the same metrics payload.
+	tb.counters.record(metrics)
+	sm := md.ResourceMetrics().At(0).ScopeMetrics().At(0)
+	tb.counters.appendTo(sm, ts)
+
 	// BuildMetrics is typically the last event in the BEP stream.
 	// Clean up invocation state after consuming traces.
-	err := tb.consumeAndRecord(ctx, traces)
+	tracesErr := tb.consumeAndRecord(ctx, traces)
+	metricsErr := tb.consumeMetrics(ctx, md)
 	delete(invocations, invocationID)
 	tb.activeInvocations.Add(ctx, -1)
-	return err
+	return errors.Join(tracesErr, metricsErr)
 }
 
 // consumeAndRecord forwards traces to the next consumer and records an error metric on failure.
@@ -448,6 +465,20 @@ func (tb *TraceBuilder) consumeAndRecord(ctx context.Context, traces ptrace.Trac
 			attribute.String("error_type", errorType),
 		))
 		return fmt.Errorf("consuming traces: %w", err)
+	}
+	return nil
+}
+
+// consumeMetrics forwards metrics to the next consumer. No-op if metricsConsumer is nil.
+func (tb *TraceBuilder) consumeMetrics(ctx context.Context, md pmetric.Metrics) error {
+	if tb.metricsConsumer == nil {
+		return nil
+	}
+	if md.MetricCount() == 0 {
+		return nil
+	}
+	if err := tb.metricsConsumer.ConsumeMetrics(ctx, md); err != nil {
+		return fmt.Errorf("consuming metrics: %w", err)
 	}
 	return nil
 }

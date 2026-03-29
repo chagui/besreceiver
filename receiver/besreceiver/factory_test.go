@@ -74,6 +74,27 @@ func TestCreateLogsReceiver(t *testing.T) {
 	}
 }
 
+func TestCreateMetricsReceiver(t *testing.T) {
+	t.Cleanup(func() {
+		sharedReceiversMu.Lock()
+		sharedReceivers = make(map[string]*besReceiver)
+		sharedReceiversMu.Unlock()
+	})
+
+	f := NewFactory()
+	cfg := f.CreateDefaultConfig()
+	sink := new(consumertest.MetricsSink)
+	settings := receivertest.NewNopSettings(metadata.Type)
+
+	recv, err := f.CreateMetrics(context.Background(), settings, cfg, sink)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if recv == nil {
+		t.Fatal("expected non-nil receiver")
+	}
+}
+
 func TestSharedReceiverInstance(t *testing.T) {
 	t.Cleanup(func() {
 		sharedReceiversMu.Lock()
@@ -97,17 +118,29 @@ func TestSharedReceiverInstance(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Both receivers should be the same underlying instance.
+	metricsSink := new(consumertest.MetricsSink)
+	metricsRecv, err := f.CreateMetrics(context.Background(), settings, cfg, metricsSink)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// All receivers should be the same underlying instance.
 	if tracesRecv != logsRecv {
 		t.Error("expected traces and logs receivers to share the same instance")
 	}
+	if tracesRecv != metricsRecv {
+		t.Error("expected traces and metrics receivers to share the same instance")
+	}
 
-	// Verify both consumers are set.
+	// Verify all three consumers are set.
 	r := tracesRecv.(*besReceiver)
 	if r.tracesConsumer == nil {
 		t.Error("expected tracesConsumer to be set")
 	}
 	if r.logsConsumer == nil {
 		t.Error("expected logsConsumer to be set")
+	}
+	if r.metricsConsumer == nil {
+		t.Error("expected metricsConsumer to be set")
 	}
 }

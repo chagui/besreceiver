@@ -5,6 +5,7 @@ import (
 	"io"
 	"testing"
 
+	"go.opentelemetry.io/collector/pdata/pmetric"
 	pb "google.golang.org/genproto/googleapis/devtools/build/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
@@ -193,6 +194,37 @@ func makeBuildMetricsOBE(t testing.TB, invID string, seqNum, wallMs, cpuMs int64
 	})
 }
 
+// sendAndACK sends a request on the stream, receives the ACK, and asserts the sequence number matches.
+func sendAndACK(t testing.TB, stream pb.PublishBuildEvent_PublishBuildToolEventStreamClient, req *pb.PublishBuildToolEventStreamRequest, expectedSeq int64) {
+	t.Helper()
+	if err := stream.Send(req); err != nil {
+		t.Fatalf("failed to send seq %d: %v", expectedSeq, err)
+	}
+	ack, err := stream.Recv()
+	if err != nil {
+		t.Fatalf("failed to receive ACK %d: %v", expectedSeq, err)
+	}
+	if ack.GetSequenceNumber() != expectedSeq {
+		t.Errorf("expected ACK seq %d, got %d", expectedSeq, ack.GetSequenceNumber())
+	}
+}
+
+// hasMetricNamed returns true if any metric in md has the given name.
+func hasMetricNamed(md pmetric.Metrics, name string) bool {
+	for i := range md.ResourceMetrics().Len() {
+		rm := md.ResourceMetrics().At(i)
+		for j := range rm.ScopeMetrics().Len() {
+			sm := rm.ScopeMetrics().At(j)
+			for k := range sm.Metrics().Len() {
+				if sm.Metrics().At(k).Name() == name {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
 // --- BES request helpers (used by receiver stream tests) ---
 
 func makeBESRequest(t testing.TB, invocationID string, seqNum int64, bepEvent *bep.BuildEvent) *pb.PublishBuildToolEventStreamRequest {
@@ -246,6 +278,27 @@ func makeBuildFinishedReq(t testing.TB, invID string, seqNum int64, code int32, 
 			Finished: &bep.BuildFinished{
 				ExitCode:   &bep.BuildFinished_ExitCode{Name: name, Code: code},
 				FinishTime: &timestamppb.Timestamp{Seconds: 1700000010},
+			},
+		},
+	})
+}
+
+func makeBuildMetricsReq(t testing.TB, invID string, seqNum, wallMs, cpuMs int64) *pb.PublishBuildToolEventStreamRequest {
+	t.Helper()
+	return makeBESRequest(t, invID, seqNum, &bep.BuildEvent{
+		Id: &bep.BuildEventId{
+			Id: &bep.BuildEventId_BuildMetrics{BuildMetrics: &bep.BuildEventId_BuildMetricsId{}},
+		},
+		Payload: &bep.BuildEvent_BuildMetrics{
+			BuildMetrics: &bep.BuildMetrics{
+				TimingMetrics: &bep.BuildMetrics_TimingMetrics{
+					WallTimeInMs: wallMs,
+					CpuTimeInMs:  cpuMs,
+				},
+				ActionSummary: &bep.BuildMetrics_ActionSummary{
+					ActionsCreated:  100,
+					ActionsExecuted: 80,
+				},
 			},
 		},
 	})
