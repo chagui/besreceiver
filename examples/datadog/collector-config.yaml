@@ -30,8 +30,6 @@ exporters:
       enabled: true
       num_consumers: 10
       queue_size: 5000
-  debug:
-    verbosity: basic
 
 service:
   extensions: [health_check]
@@ -51,8 +49,4 @@ service:
     traces:
       receivers: [bes]
       processors: [memory_limiter, batch]
-      exporters: [otlp_grpc/datadog, debug]
-    logs:
-      receivers: [bes]
-      processors: [memory_limiter, batch]
-      exporters: [debug]
+      exporters: [otlp_grpc/datadog]
