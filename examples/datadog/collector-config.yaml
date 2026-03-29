@@ -17,7 +17,7 @@ processors:
     timeout: 200ms
 
 exporters:
-  otlp/datadog:
+  otlp_grpc/datadog:
     endpoint: "dd-agent:4317"
     tls:
       insecure: true
@@ -51,7 +51,7 @@ service:
     traces:
       receivers: [bes]
       processors: [memory_limiter, batch]
-      exporters: [otlp/datadog, debug]
+      exporters: [otlp_grpc/datadog, debug]
     logs:
       receivers: [bes]
       processors: [memory_limiter, batch]

@@ -17,7 +17,7 @@ processors:
     timeout: 200ms
 
 exporters:
-  otlp/datadog:
+  otlp_grpc/datadog:
     endpoint: "localhost:4317"
     tls:
       insecure: true # Only acceptable for same-host communication (e.g. sidecar Datadog Agent).
@@ -49,7 +49,7 @@ service:
     traces:
       receivers: [bes]
       processors: [memory_limiter, batch]
-      exporters: [otlp/datadog, debug]
+      exporters: [otlp_grpc/datadog, debug]
     logs:
       receivers: [bes]
       processors: [memory_limiter, batch]
