@@ -2,7 +2,7 @@
 
 ## What this project is
 
-An OpenTelemetry Collector custom receiver that accepts Bazel Build Event Protocol (BEP) streams via the BES gRPC API and converts them into distributed traces. Bazel builds become trace flamegraphs in Datadog, Tempo, Jaeger, or any OTLP backend.
+An OpenTelemetry Collector custom receiver that accepts Bazel Build Event Protocol (BEP) streams via the BES gRPC API and converts them into distributed traces, logs, and metrics. Bazel builds become trace flamegraphs in Datadog, Tempo, Jaeger, or any OTLP backend, with build performance metrics queryable as time-series.
 
 ## Module path
 
@@ -18,8 +18,8 @@ The receiver package is at `receiver/besreceiver/`.
 Bazel --bes_backend=grpc://host:8082
   → besreceiver (gRPC BES server inside OTel Collector)
     → BEP parser (anypb.Any → bep.BuildEvent)
-    → Trace builder (BEP events → ptrace.Traces)
-    → consumer.ConsumeTraces()
+    → Trace builder (BEP events → ptrace.Traces + pmetric.Metrics)
+    → consumer.ConsumeTraces() / ConsumeMetrics() / ConsumeLogs()
   → batch processor → OTLP exporter → backend
 ```
 
@@ -46,7 +46,8 @@ bazel.build (root, traceID derived from invocation UUID)
 | `receiver/besreceiver/factory.go` | `NewFactory()`, component type `"bes"`, alpha stability |
 | `receiver/besreceiver/receiver.go` | `Start`/`Shutdown`, BES gRPC handler (`PublishBuildToolEventStream`) |
 | `receiver/besreceiver/bepparser.go` | `ParseBazelEvent`: `anypb.Any` → `bep.BuildEvent` via `proto.Unmarshal` |
-| `receiver/besreceiver/tracebuilder.go` | Core logic: per-invocation state, BEP events → `ptrace.Traces` |
+| `receiver/besreceiver/tracebuilder.go` | Core logic: per-invocation state, BEP events → `ptrace.Traces` + `pmetric.Metrics` |
+| `receiver/besreceiver/metricsbuilder.go` | Per-invocation gauges + cumulative counters from `BuildMetrics` |
 
 ## Commands
 
@@ -77,7 +78,7 @@ make docker     # docker build
 
 ## Testing patterns
 
-Tests use `consumertest.TracesSink` to capture emitted traces and assert span names, attributes, parent-child relationships, and status codes. `receivertest.NewNopSettings(componentType)` provides a no-op receiver settings for unit tests.
+Tests use `consumertest.TracesSink` and `consumertest.MetricsSink` to capture emitted traces and metrics, then assert span names, attributes, parent-child relationships, status codes, gauge values, and cumulative counter semantics. `receivertest.NewNopSettings(componentType)` provides a no-op receiver settings for unit tests.
 
 ## Running with Bazel
 

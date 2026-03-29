@@ -21,16 +21,17 @@ import (
 )
 
 type besReceiver struct {
-	config         *Config
-	logger         *zap.Logger
-	settings       receiver.Settings
-	grpcServer     *grpc.Server
-	traceBuilder   *TraceBuilder
-	listener       net.Listener
-	tracesConsumer consumer.Traces
-	logsConsumer   consumer.Logs
-	startOnce      sync.Once
-	refCount       atomic.Int32
+	config          *Config
+	logger          *zap.Logger
+	settings        receiver.Settings
+	grpcServer      *grpc.Server
+	traceBuilder    *TraceBuilder
+	listener        net.Listener
+	tracesConsumer  consumer.Traces
+	logsConsumer    consumer.Logs
+	metricsConsumer consumer.Metrics
+	startOnce       sync.Once
+	refCount        atomic.Int32
 }
 
 func (r *besReceiver) Start(ctx context.Context, host component.Host) error {
@@ -38,7 +39,7 @@ func (r *besReceiver) Start(ctx context.Context, host component.Host) error {
 
 	var startErr error
 	r.startOnce.Do(func() {
-		r.traceBuilder = NewTraceBuilder(r.tracesConsumer, r.logsConsumer, r.logger, TraceBuilderConfig{
+		r.traceBuilder = NewTraceBuilder(r.tracesConsumer, r.logsConsumer, r.metricsConsumer, r.logger, TraceBuilderConfig{
 			InvocationTimeout: r.config.InvocationTimeout,
 			ReaperInterval:    r.config.ReaperInterval,
 			MeterProvider:     r.settings.MeterProvider,

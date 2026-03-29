@@ -25,7 +25,7 @@ import (
 
 func TestPublishBuildToolEventStream_HappyPath(t *testing.T) {
 	sink := new(consumertest.TracesSink)
-	tb := NewTraceBuilder(sink, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
 	tb.Start()
 	defer tb.Stop()
 	r := &besReceiver{
@@ -70,7 +70,7 @@ func TestPublishBuildToolEventStream_EmptyStream(t *testing.T) {
 	sink := new(consumertest.TracesSink)
 	r := &besReceiver{
 		logger:       zap.NewNop(),
-		traceBuilder: NewTraceBuilder(sink, nil, zap.NewNop(), TraceBuilderConfig{}),
+		traceBuilder: NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{}),
 	}
 
 	stream := &mockBESStream{
@@ -88,7 +88,7 @@ func TestPublishBuildToolEventStream_EmptyStream(t *testing.T) {
 
 func TestPublishBuildToolEventStream_SendError(t *testing.T) {
 	sink := new(consumertest.TracesSink)
-	tb := NewTraceBuilder(sink, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
 	tb.Start()
 	defer tb.Stop()
 	r := &besReceiver{
@@ -116,7 +116,7 @@ func TestPublishBuildToolEventStream_SendError(t *testing.T) {
 func TestPublishBuildToolEventStream_RetryableConsumerError(t *testing.T) {
 	// A non-permanent consumer error should close the stream so Bazel retries.
 	errSink := consumertest.NewErr(errors.New("pipeline overloaded"))
-	tb := NewTraceBuilder(errSink, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb := NewTraceBuilder(errSink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
 	tb.Start()
 	defer tb.Stop()
 	r := &besReceiver{
@@ -148,7 +148,7 @@ func TestPublishBuildToolEventStream_PermanentConsumerError(t *testing.T) {
 	// A permanent consumer error should log but continue the stream.
 	permErr := consumererror.NewPermanent(errors.New("data rejected"))
 	errSink := consumertest.NewErr(permErr)
-	tb := NewTraceBuilder(errSink, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb := NewTraceBuilder(errSink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
 	tb.Start()
 	defer tb.Stop()
 	r := &besReceiver{
@@ -210,7 +210,7 @@ func TestShutdownRespectsContextDeadline(t *testing.T) {
 	sink := new(consumertest.TracesSink)
 	r := &besReceiver{
 		logger:       zap.NewNop(),
-		traceBuilder: NewTraceBuilder(sink, nil, zap.NewNop(), TraceBuilderConfig{}),
+		traceBuilder: NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{}),
 		grpcServer:   grpc.NewServer(),
 	}
 
@@ -229,7 +229,7 @@ func TestShutdownRespectsContextDeadline(t *testing.T) {
 
 func TestTraceBuilder_TargetConfiguredEmitsSpan(t *testing.T) {
 	sink := new(consumertest.TracesSink)
-	tb := NewTraceBuilder(sink, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
 	tb.Start()
 	defer tb.Stop()
 	ctx := context.Background()
@@ -297,7 +297,7 @@ func TestTraceBuilder_TargetConfiguredEmitsSpan(t *testing.T) {
 
 func TestTraceBuilder_BuildFinishedWithFailure(t *testing.T) {
 	sink := new(consumertest.TracesSink)
-	tb := NewTraceBuilder(sink, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
 	tb.Start()
 	defer tb.Stop()
 	ctx := context.Background()
@@ -330,7 +330,8 @@ func TestIntegration_RealGRPCServer(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	sink := new(consumertest.TracesSink)
+	tracesSink := new(consumertest.TracesSink)
+	metricsSink := new(consumertest.MetricsSink)
 	settings := receivertest.NewNopSettings(metadata.Type)
 	cfg := createDefaultConfig().(*Config)
 	cfg.NetAddr = confignet.AddrConfig{
@@ -339,10 +340,11 @@ func TestIntegration_RealGRPCServer(t *testing.T) {
 	}
 
 	recv := &besReceiver{
-		config:         cfg,
-		logger:         settings.Logger,
-		settings:       settings,
-		tracesConsumer: sink,
+		config:          cfg,
+		logger:          settings.Logger,
+		settings:        settings,
+		tracesConsumer:  tracesSink,
+		metricsConsumer: metricsSink,
 	}
 
 	host := componenttest.NewNopHost()
@@ -371,52 +373,49 @@ func TestIntegration_RealGRPCServer(t *testing.T) {
 
 	client := pb.NewPublishBuildEventClient(conn)
 
-	// 4. Open a PublishBuildToolEventStream and send events.
 	stream, err := client.PublishBuildToolEventStream(ctx)
 	if err != nil {
 		t.Fatalf("failed to open stream: %v", err)
 	}
 
-	// Send BuildStarted.
-	if err := stream.Send(makeBuildStartedReq(t, "inv-integration", "uuid-integration", "build", 1)); err != nil {
-		t.Fatalf("failed to send BuildStarted: %v", err)
-	}
-	ack1, err := stream.Recv()
-	if err != nil {
-		t.Fatalf("failed to receive ACK 1: %v", err)
-	}
-	if ack1.GetSequenceNumber() != 1 {
-		t.Errorf("expected ACK seq 1, got %d", ack1.GetSequenceNumber())
-	}
+	sendAndACK(t, stream, makeBuildStartedReq(t, "inv-integration", "uuid-integration", "build", 1), 1)
+	sendAndACK(t, stream, makeBuildFinishedReq(t, "inv-integration", 2, 0, "SUCCESS"), 2)
+	sendAndACK(t, stream, makeBuildMetricsReq(t, "inv-integration", 3, 10000, 5000), 3)
 
-	// Send BuildFinished.
-	if err := stream.Send(makeBuildFinishedReq(t, "inv-integration", 2, 0, "SUCCESS")); err != nil {
-		t.Fatalf("failed to send BuildFinished: %v", err)
-	}
-	ack2, err := stream.Recv()
-	if err != nil {
-		t.Fatalf("failed to receive ACK 2: %v", err)
-	}
-	if ack2.GetSequenceNumber() != 2 {
-		t.Errorf("expected ACK seq 2, got %d", ack2.GetSequenceNumber())
-	}
-
-	// Close the stream.
 	if err := stream.CloseSend(); err != nil {
 		t.Fatalf("failed to close stream: %v", err)
 	}
 
-	// 5. Assert spans landed in the sink.
-	if sink.SpanCount() != 1 {
-		t.Fatalf("expected 1 span, got %d", sink.SpanCount())
-	}
+	t.Run("traces", func(t *testing.T) {
+		if tracesSink.SpanCount() != 2 {
+			t.Fatalf("expected 2 spans, got %d", tracesSink.SpanCount())
+		}
 
-	span := sink.AllTraces()[0].ResourceSpans().At(0).ScopeSpans().At(0).Spans().At(0)
-	if span.Name() != "bazel.build build" {
-		t.Errorf("expected span name 'bazel.build build', got %s", span.Name())
-	}
-	cmd, ok := span.Attributes().Get("bazel.command")
-	if !ok || cmd.Str() != "build" {
-		t.Errorf("expected bazel.command=build, got %v", cmd)
-	}
+		span := tracesSink.AllTraces()[0].ResourceSpans().At(0).ScopeSpans().At(0).Spans().At(0)
+		if span.Name() != "bazel.build build" {
+			t.Errorf("expected span name 'bazel.build build', got %s", span.Name())
+		}
+		cmd, ok := span.Attributes().Get("bazel.command")
+		if !ok || cmd.Str() != "build" {
+			t.Errorf("expected bazel.command=build, got %v", cmd)
+		}
+	})
+
+	t.Run("metrics", func(t *testing.T) {
+		allMetrics := metricsSink.AllMetrics()
+		if len(allMetrics) != 1 {
+			t.Fatalf("expected 1 ConsumeMetrics call, got %d", len(allMetrics))
+		}
+
+		md := allMetrics[0]
+		if md.MetricCount() == 0 {
+			t.Fatal("expected metrics from BuildMetrics event, got 0")
+		}
+		if !hasMetricNamed(md, "bazel.invocation.wall_time") {
+			t.Error("expected bazel.invocation.wall_time gauge in metrics")
+		}
+		if !hasMetricNamed(md, "bazel.invocation.count") {
+			t.Error("expected bazel.invocation.count counter in metrics")
+		}
+	})
 }

@@ -3,7 +3,7 @@ type: bes
 status:
   class: receiver
   stability:
-    alpha: [traces, logs]
+    alpha: [traces, logs, metrics]
   codeowners:
     active: [chagui]
 

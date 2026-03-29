@@ -26,6 +26,7 @@ func NewFactory() receiver.Factory {
 		createDefaultConfig,
 		receiver.WithTraces(createTracesReceiver, metadata.TracesStability),
 		receiver.WithLogs(createLogsReceiver, metadata.LogsStability),
+		receiver.WithMetrics(createMetricsReceiver, metadata.MetricsStability),
 	)
 }
 
@@ -91,5 +92,20 @@ func createLogsReceiver(
 	}
 	r := getOrCreateReceiver(rCfg, settings)
 	r.logsConsumer = nextConsumer
+	return r, nil
+}
+
+func createMetricsReceiver(
+	_ context.Context,
+	settings receiver.Settings,
+	cfg component.Config,
+	nextConsumer consumer.Metrics,
+) (receiver.Metrics, error) {
+	rCfg, ok := cfg.(*Config)
+	if !ok {
+		return nil, fmt.Errorf("invalid config type: %T", cfg)
+	}
+	r := getOrCreateReceiver(rCfg, settings)
+	r.metricsConsumer = nextConsumer
 	return r, nil
 }
