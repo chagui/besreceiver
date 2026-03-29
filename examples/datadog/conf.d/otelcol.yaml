@@ -1,0 +1,8 @@
+logs:
+  - type: file
+    path: /var/log/otelcol/collector.log
+    source: otelcol-bazel
+    service: otelcol-bazel
+    tags:
+      - "env:dev"
+      - "version:dev"

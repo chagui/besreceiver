@@ -1,3 +1,5 @@
+logs_enabled: true
+
 otlp_config:
   receiver:
     protocols:
