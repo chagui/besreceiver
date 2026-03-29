@@ -61,8 +61,8 @@ func TestPublishBuildToolEventStream_HappyPath(t *testing.T) {
 		t.Fatalf("expected 1 span, got %d", sink.SpanCount())
 	}
 	span := sink.AllTraces()[0].ResourceSpans().At(0).ScopeSpans().At(0).Spans().At(0)
-	if span.Name() != "bazel.build" {
-		t.Errorf("expected span name bazel.build, got %s", span.Name())
+	if span.Name() != "bazel.build build" {
+		t.Errorf("expected span name 'bazel.build build', got %s", span.Name())
 	}
 }
 
@@ -267,7 +267,7 @@ func TestTraceBuilder_TargetConfiguredEmitsSpan(t *testing.T) {
 		switch spans.At(i).Name() {
 		case "bazel.target":
 			targetSpan = spans.At(i)
-		case "bazel.action":
+		case "bazel.action Javac":
 			actionSpan = spans.At(i)
 		}
 	}
@@ -287,8 +287,8 @@ func TestTraceBuilder_TargetConfiguredEmitsSpan(t *testing.T) {
 	}
 
 	// Verify the target's spanID is used as parent for the action.
-	if actionSpan.Name() != "bazel.action" {
-		t.Fatal("expected to find bazel.action span in batch")
+	if actionSpan.Name() != "bazel.action Javac" {
+		t.Fatal("expected to find 'bazel.action Javac' span in batch")
 	}
 	if actionSpan.ParentSpanID() != targetSpan.SpanID() {
 		t.Errorf("expected action parent to be target span %v, got %v", targetSpan.SpanID(), actionSpan.ParentSpanID())
@@ -412,8 +412,8 @@ func TestIntegration_RealGRPCServer(t *testing.T) {
 	}
 
 	span := sink.AllTraces()[0].ResourceSpans().At(0).ScopeSpans().At(0).Spans().At(0)
-	if span.Name() != "bazel.build" {
-		t.Errorf("expected span name bazel.build, got %s", span.Name())
+	if span.Name() != "bazel.build build" {
+		t.Errorf("expected span name 'bazel.build build', got %s", span.Name())
 	}
 	cmd, ok := span.Attributes().Get("bazel.command")
 	if !ok || cmd.Str() != "build" {

@@ -90,14 +90,14 @@ func TestTraceBuilder_ActionExecuted(t *testing.T) {
 	spans := sink.AllTraces()[0].ResourceSpans().At(0).ScopeSpans().At(0).Spans()
 	var span ptrace.Span
 	for i := range spans.Len() {
-		if spans.At(i).Name() == "bazel.action" {
+		if spans.At(i).Name() == "bazel.action Javac" {
 			span = spans.At(i)
 			break
 		}
 	}
 
-	if span.Name() != "bazel.action" {
-		t.Fatal("expected to find bazel.action span in batch")
+	if span.Name() != "bazel.action Javac" {
+		t.Fatal("expected to find 'bazel.action Javac' span in batch")
 	}
 	if span.Status().Code() != ptrace.StatusCodeError {
 		t.Error("expected error status for failed action")
@@ -130,8 +130,8 @@ func TestTraceBuilder_BuildFinished(t *testing.T) {
 
 	span := sink.AllTraces()[0].ResourceSpans().At(0).ScopeSpans().At(0).Spans().At(0)
 
-	if span.Name() != "bazel.build" {
-		t.Errorf("expected span name bazel.build, got %s", span.Name())
+	if span.Name() != "bazel.build test" {
+		t.Errorf("expected span name 'bazel.build test', got %s", span.Name())
 	}
 
 	// Verify both start and end timestamps are set.
@@ -371,7 +371,7 @@ func TestTraceBuilder_BatchFlushSingleConsumeCall(t *testing.T) {
 	for i := range spans.Len() {
 		names[spans.At(i).Name()] = true
 	}
-	for _, want := range []string{"bazel.target", "bazel.action", "bazel.build"} {
+	for _, want := range []string{"bazel.target", "bazel.action Javac", "bazel.build build"} {
 		if !names[want] {
 			t.Errorf("expected span %q in batch, got names: %v", want, names)
 		}
@@ -847,5 +847,58 @@ func TestTraceBuilder_LogConsumerErrorDoesNotBreakTraces(t *testing.T) {
 	// Traces should still be emitted despite log consumer failures.
 	if tracesSink.SpanCount() != 1 {
 		t.Fatalf("expected 1 span despite log consumer errors, got %d", tracesSink.SpanCount())
+	}
+}
+
+func TestActionSpanName_EmptyMnemonic(t *testing.T) {
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	if err := tb.ProcessOrderedBuildEvent(ctx, makeBuildStartedOBE(t, "inv-em", "uuid-em", "build", 1)); err != nil {
+		t.Fatal(err)
+	}
+	// Action with empty mnemonic.
+	if err := tb.ProcessOrderedBuildEvent(ctx, makeActionOBE(t, "inv-em", "//pkg:lib", "", 2, true)); err != nil {
+		t.Fatal(err)
+	}
+	if err := tb.ProcessOrderedBuildEvent(ctx, makeBuildFinishedOBE(t, "inv-em", 3, 0, "SUCCESS")); err != nil {
+		t.Fatal(err)
+	}
+
+	spans := sink.AllTraces()[0].ResourceSpans().At(0).ScopeSpans().At(0).Spans()
+	for i := range spans.Len() {
+		if spans.At(i).Name() == "bazel.action" {
+			return // Pass — no trailing space.
+		}
+	}
+	// Collect names for diagnostics.
+	var names []string
+	for i := range spans.Len() {
+		names = append(names, spans.At(i).Name())
+	}
+	t.Fatalf("expected 'bazel.action' span (no trailing space) in batch, got names: %v", names)
+}
+
+func TestBuildSpanName_EmptyCommand(t *testing.T) {
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	// BuildStarted with empty command.
+	if err := tb.ProcessOrderedBuildEvent(ctx, makeBuildStartedOBE(t, "inv-ec", "uuid-ec", "", 1)); err != nil {
+		t.Fatal(err)
+	}
+	if err := tb.ProcessOrderedBuildEvent(ctx, makeBuildFinishedOBE(t, "inv-ec", 2, 0, "SUCCESS")); err != nil {
+		t.Fatal(err)
+	}
+
+	span := sink.AllTraces()[0].ResourceSpans().At(0).ScopeSpans().At(0).Spans().At(0)
+	if span.Name() != "bazel.build" {
+		t.Errorf("expected span name 'bazel.build' (no trailing space), got %q", span.Name())
 	}
 }

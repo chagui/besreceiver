@@ -76,7 +76,11 @@ func (s *invocationState) addAction(label, configID string, action *bep.ActionEx
 	span := s.appendSpan()
 	span.SetSpanID(newSpanID())
 	span.SetParentSpanID(parentSpanID)
-	span.SetName("bazel.action")
+	if mnemonic := action.GetType(); mnemonic != "" {
+		span.SetName("bazel.action " + mnemonic)
+	} else {
+		span.SetName("bazel.action")
+	}
 	span.SetKind(ptrace.SpanKindInternal)
 
 	if action.GetStartTime() != nil {
@@ -146,7 +150,14 @@ func (s *invocationState) finalize(finished *bep.BuildFinished) (ptrace.Traces, 
 
 	span := s.appendSpan()
 	span.SetSpanID(s.rootSpanID)
-	span.SetName("bazel.build")
+	// command is a free-form string in the proto, but in practice bounded to
+	// Bazel's fixed command set (~20: build, test, run, query, clean, etc.).
+	// Only a subset (~5-7) emit BES events that reach this code path.
+	if s.started != nil && s.started.GetCommand() != "" {
+		span.SetName("bazel.build " + s.started.GetCommand())
+	} else {
+		span.SetName("bazel.build")
+	}
 	span.SetKind(ptrace.SpanKindServer)
 
 	if s.started != nil && s.started.GetStartTime() != nil {
