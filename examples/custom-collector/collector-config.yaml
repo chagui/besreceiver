@@ -12,7 +12,7 @@ processors:
     timeout: 200ms
 
 exporters:
-  # Replace with your own exporter (otlp, datadog, jaeger, etc.)
+  # Replace with your own exporter (otlp_grpc, datadog, jaeger, etc.)
   debug:
     verbosity: detailed
 
