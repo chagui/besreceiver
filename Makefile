@@ -1,5 +1,5 @@
 .PHONY: all build test test-short test-cover test-bench lint vet clean fuzz fix generate ocb ci docker \
-       compose-build compose-up compose-down compose-clean example agent-status
+       compose-build compose-up compose-down compose-clean example agent-status nilaway deadcode
 
 # Use absolute path: GNU Make 3.81 (macOS default) doesn't propagate export PATH to recipe shells.
 GOTESTSUM := $(shell go env GOPATH)/bin/gotestsum
@@ -60,6 +60,14 @@ clean:
 ## ocb: Build the custom collector binary with OCB
 ocb:
 	builder --config builder-config.yaml
+
+## nilaway: Run Uber's nil-pointer flow analysis
+nilaway:
+	go run go.uber.org/nilaway/cmd/nilaway@latest ./...
+
+## deadcode: Find unreachable functions via call-graph analysis
+deadcode:
+	go run golang.org/x/tools/cmd/deadcode@latest -test ./...
 
 ## ci: Run the full CI chain locally
 ci: vet lint test build

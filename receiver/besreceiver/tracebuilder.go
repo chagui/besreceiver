@@ -180,18 +180,40 @@ func (tb *TraceBuilder) processEvent(ctx context.Context, invocations map[string
 	tb.eventsProcessed.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("event_type", eventTypeName(event)),
 	))
-	switch p := event.GetPayload().(type) {
+	payload := event.GetPayload()
+	if payload == nil {
+		return nil
+	}
+	switch p := payload.(type) {
 	case *bep.BuildEvent_Started:
+		if p.Started == nil {
+			return nil
+		}
 		return tb.handleBuildStarted(ctx, invocations, invocationID, p.Started)
 	case *bep.BuildEvent_Configured:
+		if p.Configured == nil {
+			return nil
+		}
 		return tb.handleTargetConfigured(ctx, invocations, invocationID, event.GetId(), p.Configured)
 	case *bep.BuildEvent_Action:
+		if p.Action == nil {
+			return nil
+		}
 		return tb.handleActionExecuted(ctx, invocations, invocationID, event.GetId(), p.Action)
 	case *bep.BuildEvent_TestResult:
+		if p.TestResult == nil {
+			return nil
+		}
 		return tb.handleTestResult(ctx, invocations, invocationID, event.GetId(), p.TestResult)
 	case *bep.BuildEvent_Finished:
+		if p.Finished == nil {
+			return nil
+		}
 		return tb.handleBuildFinished(ctx, invocations, invocationID, p.Finished)
 	case *bep.BuildEvent_BuildMetrics:
+		if p.BuildMetrics == nil {
+			return nil
+		}
 		return tb.handleBuildMetrics(ctx, invocations, invocationID, p.BuildMetrics)
 	}
 	return nil
