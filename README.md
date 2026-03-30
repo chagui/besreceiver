@@ -55,13 +55,13 @@ The receiver is configured under `receivers.bes` in the collector YAML. It embed
 ## Development
 
 ```bash
-make test      # Run tests (with race detector, no cache)
-make lint      # Run golangci-lint
-make vet       # Run go vet
-make build     # Verify compilation
-make ci        # Run the full CI chain: vet → lint → test → build
+make test       # Run tests (with race detector, no cache)
+make lint       # Run golangci-lint
+make vet        # Run go vet
+make build      # Verify compilation
+make ci         # Run the full CI chain: vet → lint → test → build
 make test-bench # Run benchmarks
-make fuzz      # Run fuzz tests
+make fuzz       # Run fuzz tests
 ```
 
 ## Documentation
