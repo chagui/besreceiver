@@ -64,7 +64,7 @@ make docker     # docker build
 
 ## Dependencies
 
-- **BEP types**: vendored proto sources in `third_party/bazel/protobuf/`, generated Go code in `internal/bep/`
+- **BEP types**: vendored proto sources in `third_party/bazel/protobuf/`, generated Go code in `internal/bep/`. Version pinned in `third_party/bazel/VERSION`
 - **BES gRPC transport**: `google.golang.org/genproto/googleapis/devtools/build/v1` (pre-compiled `PublishBuildEvent` service)
 - **OTel Collector**: `go.opentelemetry.io/collector/{component,consumer,receiver,pdata,config/configgrpc}` — v1.52.0 stable / v0.146.1 experimental
 
@@ -74,7 +74,7 @@ make docker     # docker build
 - **OpenTelemetry over Datadog native**: vendor-neutral, multi-backend via YAML config
 - **pdata API, not OTel SDK**: we construct traces retrospectively from an event stream, not instrumenting live code — pdata gives explicit control over TraceIDs, SpanIDs, timestamps
 - **Deterministic traceID**: SHA-256 of invocation UUID, so the same build always produces the same trace ID
-- **Vendored BEP protos**: proto sources in `third_party/bazel/protobuf/`, generated Go code in `internal/bep/` — keeps the project self-contained with no external replace directives
+- **Vendored BEP protos**: proto sources in `third_party/bazel/protobuf/`, generated Go code in `internal/bep/` — keeps the project self-contained with no external replace directives. Pinned to a specific Bazel commit in `third_party/bazel/VERSION`; see `third_party/bazel/README.md` for update instructions
 
 ## Testing patterns
 
