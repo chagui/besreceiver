@@ -1,0 +1,10 @@
+# Bazel source commit from which the BEP protobuf definitions were extracted.
+# This is a master branch commit (post-9.0.1), not a tagged release.
+#
+# To update: check out the target commit, copy the proto files listed in
+# README.md, adjust import paths and go_package options, then run
+# `make generate` to regenerate the Go code.
+
+BAZEL_COMMIT=7761553ba254f84cfdf34981b5a4a536e9b014b9
+BAZEL_COMMIT_DATE=2026-02-19
+BAZEL_NEAREST_RELEASE=9.0.1
