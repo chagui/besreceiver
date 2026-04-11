@@ -1,0 +1,28 @@
+load("@rules_java//java:defs.bzl", "java_binary", "java_library", "java_test")
+
+java_library(
+    name = "processor_lib",
+    srcs = ["TaskProcessor.java"],
+    visibility = ["//visibility:public"],
+    deps = ["//proto:task_java_proto"],
+)
+
+java_binary(
+    name = "processor",
+    main_class = "com.taskforge.processor.TaskProcessor",
+    visibility = ["//visibility:public"],
+    runtime_deps = [":processor_lib"],
+)
+
+java_test(
+    name = "processor_test",
+    size = "small",
+    srcs = ["TaskProcessorTest.java"],
+    main_class = "com.taskforge.processor.TaskProcessorTest",
+    test_class = "com.taskforge.processor.TaskProcessorTest",
+    use_testrunner = False,
+    deps = [
+        ":processor_lib",
+        "//proto:task_java_proto",
+    ],
+)

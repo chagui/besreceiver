@@ -20,6 +20,11 @@ type invocationState struct {
 	pendingTraces ptrace.Traces     // batch of spans accumulated during the build
 	scopeSpans    ptrace.ScopeSpans // reference into pendingTraces for span appending
 	flushed       bool              // true after BuildFinished flushes the batch
+
+	// orphanedSpans tracks spans whose target hadn't arrived yet at insertion time.
+	// Keyed by label, each entry is a list of span indices (into scopeSpans.Spans())
+	// that should be reparented when addTarget is called for that label.
+	orphanedSpans map[string][]int
 }
 
 func newInvocationState(traceID pcommon.TraceID, rootSpanID pcommon.SpanID, started *bep.BuildStarted, now time.Time) *invocationState {
@@ -64,6 +69,9 @@ func (s *invocationState) addTarget(label, ruleKind string) {
 	if ruleKind != "" {
 		span.Attributes().PutStr("bazel.target.rule_kind", ruleKind)
 	}
+
+	// Reparent any actions/tests that arrived before this target.
+	s.reparentOrphans(label, spanID)
 }
 
 func (s *invocationState) addAction(label, configID string, action *bep.ActionExecuted) {
@@ -71,10 +79,17 @@ func (s *invocationState) addAction(label, configID string, action *bep.ActionEx
 		return
 	}
 
-	parentSpanID := s.resolveTargetSpan(label, configID)
+	parentSpanID, resolved := s.resolveTargetSpan(label, configID)
 
+	spanIdx := s.scopeSpans.Spans().Len()
 	span := s.appendSpan()
 	span.SetSpanID(newSpanID())
+
+	// If the target hasn't been configured yet, record this span for
+	// deferred reparenting when addTarget is called.
+	if !resolved && label != "" {
+		s.recordOrphan(label, spanIdx)
+	}
 	span.SetParentSpanID(parentSpanID)
 	if mnemonic := action.GetType(); mnemonic != "" {
 		span.SetName("bazel.action " + mnemonic)
@@ -108,10 +123,15 @@ func (s *invocationState) addTestResult(label, configID string, tr *bep.BuildEve
 		return
 	}
 
-	parentSpanID := s.resolveTargetSpan(label, configID)
+	parentSpanID, resolved := s.resolveTargetSpan(label, configID)
 
+	spanIdx := s.scopeSpans.Spans().Len()
 	span := s.appendSpan()
 	span.SetSpanID(newSpanID())
+
+	if !resolved && label != "" {
+		s.recordOrphan(label, spanIdx)
+	}
 	span.SetParentSpanID(parentSpanID)
 	span.SetName("bazel.test")
 	span.SetKind(ptrace.SpanKindInternal)
@@ -184,6 +204,7 @@ func (s *invocationState) finalize(finished *bep.BuildFinished) (ptrace.Traces, 
 	}
 
 	s.flushed = true
+	s.orphanedSpans = nil
 	return s.pendingTraces, true
 }
 
@@ -223,17 +244,40 @@ func (s *invocationState) flushOrphaned() (ptrace.Traces, bool) {
 	return s.pendingTraces, true
 }
 
-func (s *invocationState) resolveTargetSpan(label, configID string) pcommon.SpanID {
-	// Try exact match with config
+// resolveTargetSpan looks up the target span for a label. Returns the span ID
+// and whether the target was found. When not found, falls back to rootSpanID.
+func (s *invocationState) resolveTargetSpan(label, configID string) (pcommon.SpanID, bool) {
 	if spanID, ok := s.targets[targetKey(label, configID)]; ok {
-		return spanID
+		return spanID, true
 	}
-	// Try label-only match
 	if spanID, ok := s.targets[targetKey(label, "")]; ok {
-		return spanID
+		return spanID, true
 	}
-	// Fall back to root span
-	return s.rootSpanID
+	return s.rootSpanID, false
+}
+
+// recordOrphan tracks a span index that needs reparenting when its target arrives.
+func (s *invocationState) recordOrphan(label string, spanIdx int) {
+	if s.orphanedSpans == nil {
+		s.orphanedSpans = make(map[string][]int)
+	}
+	s.orphanedSpans[label] = append(s.orphanedSpans[label], spanIdx)
+}
+
+// reparentOrphans updates any previously-orphaned spans for the given label
+// to be children of the target span.
+func (s *invocationState) reparentOrphans(label string, targetSpanID pcommon.SpanID) {
+	indices, ok := s.orphanedSpans[label]
+	if !ok {
+		return
+	}
+	spans := s.scopeSpans.Spans()
+	for _, idx := range indices {
+		if idx < spans.Len() {
+			spans.At(idx).SetParentSpanID(targetSpanID)
+		}
+	}
+	delete(s.orphanedSpans, label)
 }
 
 // appendSpan appends a new span to the invocation's pending batch.

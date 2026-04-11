@@ -1,0 +1,21 @@
+load("@protobuf//bazel:proto_library.bzl", "proto_library")
+load("@protobuf//bazel:java_proto_library.bzl", "java_proto_library")
+load("@protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
+
+proto_library(
+    name = "task_proto",
+    srcs = ["task.proto"],
+    visibility = ["//visibility:public"],
+)
+
+java_proto_library(
+    name = "task_java_proto",
+    visibility = ["//visibility:public"],
+    deps = [":task_proto"],
+)
+
+cc_proto_library(
+    name = "task_cc_proto",
+    visibility = ["//visibility:public"],
+    deps = [":task_proto"],
+)

@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/collector/consumer/consumererror"
 	"go.opentelemetry.io/collector/consumer/consumertest"
 	"go.opentelemetry.io/collector/pdata/pcommon"
@@ -440,7 +442,7 @@ func TestResolveTargetSpan(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := state.resolveTargetSpan(tt.label, tt.configID)
+			got, _ := state.resolveTargetSpan(tt.label, tt.configID)
 			if got != tt.want {
 				t.Errorf("resolveTargetSpan(%q, %q) = %v, want %v", tt.label, tt.configID, got, tt.want)
 			}
@@ -967,4 +969,88 @@ func TestTraceBuilder_CumulativeCountersAcrossInvocations(t *testing.T) {
 	if !found {
 		t.Error("expected to find bazel.invocation.count metric in second batch")
 	}
+}
+
+// TestActionBeforeTarget verifies that an action arriving before its target's
+// TargetConfigured event is still correctly parented under the target span.
+//
+// In real Bazel BES streams, event ordering is by completion time, not
+// dependency order. ActionExecuted can arrive before TargetConfigured.
+func TestActionBeforeTarget(t *testing.T) {
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	// Event order: Started → Action → Target → Finished
+	// The action for //pkg:lib arrives BEFORE TargetConfigured for //pkg:lib.
+	require.NoError(t, tb.ProcessOrderedBuildEvent(ctx,
+		makeBuildStartedOBE(t, "inv-order", "uuid-order", "build", 1)))
+	require.NoError(t, tb.ProcessOrderedBuildEvent(ctx,
+		makeActionOBE(t, "inv-order", "//pkg:lib", "Javac", 2, true)))
+	require.NoError(t, tb.ProcessOrderedBuildEvent(ctx,
+		makeTargetConfiguredOBE(t, "inv-order", "//pkg:lib", 3)))
+	require.NoError(t, tb.ProcessOrderedBuildEvent(ctx,
+		makeBuildFinishedOBE(t, "inv-order", 4, 0, "SUCCESS")))
+
+	require.Equal(t, 3, sink.SpanCount(), "expected 3 spans: root + target + action")
+
+	spans := collectSpans(t, sink)
+
+	var actionSpan, targetSpan spanInfo
+	for _, s := range spans {
+		switch s.Name {
+		case "bazel.action Javac":
+			actionSpan = s
+		case "bazel.target":
+			targetSpan = s
+		}
+	}
+
+	require.NotEmpty(t, actionSpan.Name, "action span not found")
+	require.NotEmpty(t, targetSpan.Name, "target span not found")
+
+	assert.Equal(t, targetSpan.SpanID, actionSpan.ParentSpanID,
+		"action should be child of target even when action arrives first")
+}
+
+// TestTestResultBeforeTarget verifies that a test result arriving before its
+// target's TargetConfigured event is reparented under the target span.
+func TestTestResultBeforeTarget(t *testing.T) {
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	// Event order: Started → TestResult → Target → Finished
+	require.NoError(t, tb.ProcessOrderedBuildEvent(ctx,
+		makeBuildStartedOBE(t, "inv-test-order", "uuid-test-order", "test", 1)))
+	require.NoError(t, tb.ProcessOrderedBuildEvent(ctx,
+		makeTestResultOBE(t, "inv-test-order", "//pkg:test", 2, bep.TestStatus_PASSED)))
+	require.NoError(t, tb.ProcessOrderedBuildEvent(ctx,
+		makeTargetConfiguredOBE(t, "inv-test-order", "//pkg:test", 3)))
+	require.NoError(t, tb.ProcessOrderedBuildEvent(ctx,
+		makeBuildFinishedOBE(t, "inv-test-order", 4, 0, "SUCCESS")))
+
+	require.Equal(t, 3, sink.SpanCount(), "expected 3 spans: root + target + test")
+
+	spans := collectSpans(t, sink)
+
+	var testSpan, targetSpan spanInfo
+	for _, s := range spans {
+		switch s.Name {
+		case "bazel.test":
+			testSpan = s
+		case "bazel.target":
+			targetSpan = s
+		}
+	}
+
+	require.NotEmpty(t, testSpan.Name, "test span not found")
+	require.NotEmpty(t, targetSpan.Name, "target span not found")
+
+	assert.Equal(t, targetSpan.SpanID, testSpan.ParentSpanID,
+		"test should be child of target even when test result arrives first")
 }
