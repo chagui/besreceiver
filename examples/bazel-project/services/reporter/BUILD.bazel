@@ -1,0 +1,22 @@
+load("@rules_python//python:defs.bzl", "py_binary", "py_library", "py_test")
+
+py_library(
+    name = "reporter_lib",
+    srcs = ["reporter.py"],
+    visibility = ["//visibility:public"],
+)
+
+py_binary(
+    name = "reporter",
+    srcs = ["reporter.py"],
+    main = "reporter.py",
+    visibility = ["//visibility:public"],
+)
+
+py_test(
+    name = "reporter_test",
+    size = "small",
+    srcs = ["reporter_test.py"],
+    imports = ["../.."],
+    deps = [":reporter_lib"],
+)

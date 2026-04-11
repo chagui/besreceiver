@@ -105,24 +105,26 @@ example: compose-up
 	cd examples/bazel-project && bazel test //... --bes_backend=grpc://localhost:8082
 
 BESSTREAM_DIR := receiver/besreceiver/testdata/besstream
-BESRECORD_PORT := 18082
 
 ## record: Record a BES stream (usage: make record OUTPUT=path/to/file.besstream)
 record:
-	go run ./cmd/besrecord -addr localhost:$(BESRECORD_PORT) -output $(OUTPUT)
+	go run ./cmd/besrecord -output $(OUTPUT)
 
 ## record-fixtures: Re-capture all E2E test fixtures from the example Bazel project
 record-fixtures:
 	@mkdir -p $(BESSTREAM_DIR)
-	@echo "Starting BES recorder..."
-	@go run ./cmd/besrecord -addr localhost:$(BESRECORD_PORT) \
-		-output $(BESSTREAM_DIR)/build_and_test.besstream &\
+	@PORT_FILE=$$(mktemp); \
+		echo "Starting BES recorder on ephemeral port..."; \
+		go run ./cmd/besrecord \
+			-output $(BESSTREAM_DIR)/build_and_test.besstream \
+			-port-file $$PORT_FILE &\
 		RECORD_PID=$$!; \
-		echo "Waiting for recorder to be ready..."; \
-		until nc -z localhost $(BESRECORD_PORT) 2>/dev/null; do sleep 0.1; done; \
-		echo "Running bazel test..."; \
+		while [ ! -s $$PORT_FILE ]; do sleep 0.1; done; \
+		PORT=$$(cat $$PORT_FILE); \
+		rm -f $$PORT_FILE; \
+		echo "Recorder ready on port $$PORT"; \
 		cd examples/bazel-project && bazel test //... \
-			--bes_backend=grpc://localhost:$(BESRECORD_PORT) 2>&1; \
+			--bes_backend=grpc://localhost:$$PORT 2>&1; \
 		kill $$RECORD_PID 2>/dev/null; \
 		wait $$RECORD_PID 2>/dev/null; \
 		echo "Fixtures captured."

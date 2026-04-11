@@ -1,0 +1,21 @@
+load("@rules_cc//cc:defs.bzl", "cc_binary", "cc_test")
+
+cc_binary(
+    name = "engine",
+    srcs = ["engine.cc"],
+    visibility = ["//visibility:public"],
+    deps = [
+        "//libs/hash",
+        "//proto:task_cc_proto",
+    ],
+)
+
+cc_test(
+    name = "engine_test",
+    size = "small",
+    srcs = ["engine_test.cc"],
+    deps = [
+        "//libs/hash",
+        "//proto:task_cc_proto",
+    ],
+)
