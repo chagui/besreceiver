@@ -1,0 +1,22 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
+
+go_library(
+    name = "gateway_lib",
+    srcs = ["gateway.go"],
+    importpath = "taskforge/services/gateway",
+    deps = ["//libs/tasklib"],
+)
+
+go_binary(
+    name = "gateway",
+    embed = [":gateway_lib"],
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "gateway_test",
+    size = "small",
+    srcs = ["gateway_test.go"],
+    embed = [":gateway_lib"],
+    deps = ["//libs/tasklib"],
+)

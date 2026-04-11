@@ -1,0 +1,44 @@
+load("@rules_pkg//:pkg.bzl", "pkg_tar")
+load("@rules_oci//oci:defs.bzl", "oci_image", "oci_load")
+
+# --- Gateway (Go, static binary) ---
+
+pkg_tar(
+    name = "gateway_layer",
+    srcs = ["//services/gateway"],
+    package_dir = "/app",
+)
+
+oci_image(
+    name = "gateway_image",
+    base = "@distroless_cc",
+    entrypoint = ["/app/gateway"],
+    tars = [":gateway_layer"],
+)
+
+oci_load(
+    name = "gateway_load",
+    image = ":gateway_image",
+    repo_tags = ["taskforge/gateway:latest"],
+)
+
+# --- Engine (C++) ---
+
+pkg_tar(
+    name = "engine_layer",
+    srcs = ["//services/engine"],
+    package_dir = "/app",
+)
+
+oci_image(
+    name = "engine_image",
+    base = "@distroless_cc",
+    entrypoint = ["/app/engine"],
+    tars = [":engine_layer"],
+)
+
+oci_load(
+    name = "engine_load",
+    image = ":engine_image",
+    repo_tags = ["taskforge/engine:latest"],
+)

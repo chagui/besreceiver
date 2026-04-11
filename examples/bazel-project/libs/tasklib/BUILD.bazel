@@ -1,0 +1,15 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "tasklib",
+    srcs = ["task.go"],
+    importpath = "taskforge/libs/tasklib",
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "tasklib_test",
+    size = "small",
+    srcs = ["task_test.go"],
+    embed = [":tasklib"],
+)
