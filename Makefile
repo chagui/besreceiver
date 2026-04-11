@@ -1,5 +1,5 @@
-.PHONY: all build test test-short test-cover test-bench lint vet clean fuzz fix generate ocb ci docker \
-       compose-build compose-up compose-down compose-clean example agent-status nilaway deadcode
+.PHONY: all build test test-short test-cover test-bench test-e2e lint vet clean fuzz fix generate ocb ci docker \
+       compose-build compose-up compose-down compose-clean example record record-fixtures agent-status nilaway deadcode
 
 # Use absolute path: GNU Make 3.81 (macOS default) doesn't propagate export PATH to recipe shells.
 GOTESTSUM := $(shell go env GOPATH)/bin/gotestsum
@@ -26,6 +26,10 @@ test-cover:
 ## test-bench: Run benchmarks with memory allocation stats
 test-bench:
 	go test -bench=. -benchmem -run=^$$ ./...
+
+## test-e2e: Run end-to-end tests with real BES fixtures
+test-e2e:
+	$(GOTESTSUM) -- -count 1 -race -run TestE2E ./receiver/besreceiver/
 
 ## fuzz: Run fuzz tests for 30 seconds
 fuzz:
@@ -99,6 +103,29 @@ example: compose-up
 	@echo "Waiting for collector to be ready..."
 	@until wget -q --spider http://localhost:13133 2>/dev/null; do sleep 2; done
 	cd examples/bazel-project && bazel test //... --bes_backend=grpc://localhost:8082
+
+BESSTREAM_DIR := receiver/besreceiver/testdata/besstream
+BESRECORD_PORT := 18082
+
+## record: Record a BES stream (usage: make record OUTPUT=path/to/file.besstream)
+record:
+	go run ./cmd/besrecord -addr localhost:$(BESRECORD_PORT) -output $(OUTPUT)
+
+## record-fixtures: Re-capture all E2E test fixtures from the example Bazel project
+record-fixtures:
+	@mkdir -p $(BESSTREAM_DIR)
+	@echo "Starting BES recorder..."
+	@go run ./cmd/besrecord -addr localhost:$(BESRECORD_PORT) \
+		-output $(BESSTREAM_DIR)/build_and_test.besstream &\
+		RECORD_PID=$$!; \
+		echo "Waiting for recorder to be ready..."; \
+		until nc -z localhost $(BESRECORD_PORT) 2>/dev/null; do sleep 0.1; done; \
+		echo "Running bazel test..."; \
+		cd examples/bazel-project && bazel test //... \
+			--bes_backend=grpc://localhost:$(BESRECORD_PORT) 2>&1; \
+		kill $$RECORD_PID 2>/dev/null; \
+		wait $$RECORD_PID 2>/dev/null; \
+		echo "Fixtures captured."
 
 ## agent-status: Show Datadog Agent status
 agent-status:
