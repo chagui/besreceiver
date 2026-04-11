@@ -106,13 +106,13 @@ func BenchmarkResolveTargetSpan(b *testing.B) {
 
 	b.Run("exact_match", func(b *testing.B) {
 		for range b.N {
-			_ = state.resolveTargetSpan("//pkg:target-50", "cfg-50")
+			_, _ = state.resolveTargetSpan("//pkg:target-50", "cfg-50")
 		}
 	})
 
 	b.Run("root_fallback", func(b *testing.B) {
 		for range b.N {
-			_ = state.resolveTargetSpan("//pkg:nonexistent", "cfg-0")
+			_, _ = state.resolveTargetSpan("//pkg:nonexistent", "cfg-0")
 		}
 	})
 }
