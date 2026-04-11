@@ -7,14 +7,13 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestE2E_BuildAndTest replays a real BES stream captured from:
+// TestE2E_BuildAndTest replays a real BES stream captured from the TaskForge
+// multi-language example project:
 //
 //	cd examples/bazel-project && bazel test //... --bes_backend=grpc://localhost:8082
 //
-// The fixture contains 36 events from a single invocation including BuildStarted,
-// TargetConfigured (x2: //:greeting, //:pass_test), ActionExecuted (BazelWorkspaceStatusAction),
-// TestResult (PASSED), BuildFinished, and BuildMetrics, plus many event types the
-// receiver silently ignores (Progress, Configuration, NamedSetOfFiles, etc.).
+// The fixture contains events from a single invocation across Go, Java, C++,
+// Python, and proto targets, plus shell tests (including sharded).
 func TestE2E_BuildAndTest(t *testing.T) {
 	requests := loadBESStream(t, "testdata/besstream/build_and_test.besstream")
 
@@ -49,10 +48,18 @@ func TestE2E_BuildAndTest(t *testing.T) {
 		// --- Fixture-specific assertions ---
 		// These depend on the exact captured build and will break if the fixture
 		// is re-captured with different cache state or Bazel version.
+		// Current fixture: TaskForge monorepo (Go, Java, C++, Python, proto, shell).
 		t.Run("fixture_contents", func(t *testing.T) {
-			require.Len(t, spans, 6, "span names: %v", spanNames(spans))
-			assertSpanAttribute(t, spans, "bazel.target", "bazel.target.label", "//:greeting")
-			assertSpanAttribute(t, spans, "bazel.target", "bazel.target.label", "//:pass_test")
+			// The TaskForge monorepo produces targets across Go, Java, C++,
+			// Python, proto, OCI, and shell — verify key representatives exist.
+			assertSpanAttribute(t, spans, "bazel.target", "bazel.target.label", "//services/gateway:gateway")
+			assertSpanAttribute(t, spans, "bazel.target", "bazel.target.label", "//services/engine:engine")
+			assertSpanAttribute(t, spans, "bazel.target", "bazel.target.label", "//services/processor:processor")
+			assertSpanAttribute(t, spans, "bazel.target", "bazel.target.label", "//services/reporter:reporter")
+			assertSpanAttribute(t, spans, "bazel.target", "bazel.target.label", "//proto:task_proto")
+			assertSpanAttribute(t, spans, "bazel.target", "bazel.target.label", "//libs/hash:hash")
+			assertSpanAttribute(t, spans, "bazel.target", "bazel.target.label", "//libs/tasklib:tasklib")
+
 			assertSpanExists(t, spans, "bazel.action BazelWorkspaceStatusAction")
 			assertSpanExists(t, spans, "bazel.test")
 			assertSpanAttribute(t, spans, "bazel.test", "bazel.test.status", "PASSED")

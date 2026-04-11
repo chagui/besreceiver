@@ -40,8 +40,9 @@ func main() {
 }
 
 func run() error {
-	addr := flag.String("addr", "localhost:8082", "gRPC listen address")
+	addr := flag.String("addr", "localhost:0", "gRPC listen address (use port 0 for ephemeral)")
 	output := flag.String("output", "", "output .besstream file path (required)")
+	portFile := flag.String("port-file", "", "write the assigned port to this file (useful with -addr localhost:0)")
 	flag.Parse()
 
 	if *output == "" {
@@ -58,6 +59,18 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("failed to listen on %s: %w", *addr, err)
 	}
+
+	// Write the assigned port to a file so callers can discover it.
+	if *portFile != "" {
+		_, port, splitErr := net.SplitHostPort(lis.Addr().String())
+		if splitErr != nil {
+			return fmt.Errorf("parsing listen address: %w", splitErr)
+		}
+		if writeErr := os.WriteFile(*portFile, []byte(port), 0o600); writeErr != nil {
+			return fmt.Errorf("writing port file: %w", writeErr)
+		}
+	}
+
 	log.Printf("Recording BES streams on %s -> %s", lis.Addr(), *output)
 
 	// Graceful shutdown on SIGINT/SIGTERM.

@@ -1,1 +1,4 @@
 build --build_event_publish_all_actions
+
+# Use hermetic remote JDK (no local JAVA_HOME required).
+build --java_runtime_version=remotejdk_21
