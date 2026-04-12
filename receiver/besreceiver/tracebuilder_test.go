@@ -905,6 +905,129 @@ func TestBuildSpanName_EmptyCommand(t *testing.T) {
 	}
 }
 
+// --- Ordering assumption canary tests ---
+//
+// These tests document the current behavior when BEP events arrive out of the
+// expected order. They serve as canaries: if a future Bazel version changes the
+// event ordering contract, these tests pin exactly what breaks (or doesn't).
+
+func TestTraceBuilder_ActionBeforeTargetConfigured(t *testing.T) {
+	// When ActionExecuted arrives before TargetConfigured for the same target,
+	// the action is initially parented to root, then reparented under the target
+	// when TargetConfigured arrives (deferred reparenting).
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	if err := tb.ProcessOrderedBuildEvent(ctx, makeBuildStartedOBE(t, "inv-ooo", "uuid-ooo", "build", 1)); err != nil {
+		t.Fatal(err)
+	}
+	// Action arrives BEFORE its target is configured.
+	if err := tb.ProcessOrderedBuildEvent(ctx, makeActionOBE(t, "inv-ooo", "//pkg:lib", "Javac", 2, true)); err != nil {
+		t.Fatal(err)
+	}
+	// Target configured arrives AFTER the action — triggers reparenting.
+	if err := tb.ProcessOrderedBuildEvent(ctx, makeTargetConfiguredOBE(t, "inv-ooo", "//pkg:lib", 3)); err != nil {
+		t.Fatal(err)
+	}
+	if err := tb.ProcessOrderedBuildEvent(ctx, makeBuildFinishedOBE(t, "inv-ooo", 4, 0, "SUCCESS")); err != nil {
+		t.Fatal(err)
+	}
+
+	// All 3 spans should be present: action, target, root.
+	if sink.SpanCount() != 3 {
+		t.Fatalf("expected 3 spans, got %d", sink.SpanCount())
+	}
+
+	spans := sink.AllTraces()[0].ResourceSpans().At(0).ScopeSpans().At(0).Spans()
+	var actionSpan, targetSpan ptrace.Span
+	for i := range spans.Len() {
+		switch {
+		case spans.At(i).Name() == "bazel.action Javac":
+			actionSpan = spans.At(i)
+		case spans.At(i).Name() == "bazel.target":
+			targetSpan = spans.At(i)
+		}
+	}
+
+	if actionSpan.Name() == "" || targetSpan.Name() == "" {
+		t.Fatal("expected to find both action and target spans")
+	}
+
+	// After reparenting, the action should be a child of the target span,
+	// not the root. This verifies deferred reparenting works correctly.
+	if actionSpan.ParentSpanID() != targetSpan.SpanID() {
+		t.Errorf("expected action parent to be target span %v (reparented), got %v",
+			targetSpan.SpanID(), actionSpan.ParentSpanID())
+	}
+}
+
+func TestTraceBuilder_TargetConfiguredAfterBuildFinished(t *testing.T) {
+	// TargetConfigured arriving after BuildFinished should be silently dropped
+	// because the invocation is already flushed.
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	if err := tb.ProcessOrderedBuildEvent(ctx, makeBuildStartedOBE(t, "inv-late-tc", "uuid-late-tc", "build", 1)); err != nil {
+		t.Fatal(err)
+	}
+	if err := tb.ProcessOrderedBuildEvent(ctx, makeBuildFinishedOBE(t, "inv-late-tc", 2, 0, "SUCCESS")); err != nil {
+		t.Fatal(err)
+	}
+
+	spansBefore := sink.SpanCount()
+
+	// TargetConfigured arrives after flush — should be a no-op.
+	if err := tb.ProcessOrderedBuildEvent(ctx, makeTargetConfiguredOBE(t, "inv-late-tc", "//pkg:lib", 3)); err != nil {
+		t.Fatal(err)
+	}
+
+	if sink.SpanCount() != spansBefore {
+		t.Errorf("expected no new spans after flush, got %d new", sink.SpanCount()-spansBefore)
+	}
+}
+
+func TestTraceBuilder_ActionAfterBuildFinishedBeforeMetrics(t *testing.T) {
+	// ActionExecuted arriving after BuildFinished (but before BuildMetrics
+	// cleans up state) should be silently dropped.
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	if err := tb.ProcessOrderedBuildEvent(ctx, makeBuildStartedOBE(t, "inv-late-act", "uuid-late-act", "build", 1)); err != nil {
+		t.Fatal(err)
+	}
+	if err := tb.ProcessOrderedBuildEvent(ctx, makeBuildFinishedOBE(t, "inv-late-act", 2, 0, "SUCCESS")); err != nil {
+		t.Fatal(err)
+	}
+
+	spansBefore := sink.SpanCount()
+
+	// Action arrives after flush but before BuildMetrics — should be a no-op.
+	if err := tb.ProcessOrderedBuildEvent(ctx, makeActionOBE(t, "inv-late-act", "//pkg:lib", "Javac", 3, true)); err != nil {
+		t.Fatal(err)
+	}
+
+	if sink.SpanCount() != spansBefore {
+		t.Errorf("expected no new spans after flush, got %d new", sink.SpanCount()-spansBefore)
+	}
+
+	// BuildMetrics should still work normally after the dropped action.
+	if err := tb.ProcessOrderedBuildEvent(ctx, makeBuildMetricsOBE(t, "inv-late-act", 4, 10000, 5000)); err != nil {
+		t.Fatal(err)
+	}
+	if sink.SpanCount() != spansBefore+1 {
+		t.Errorf("expected 1 new span from BuildMetrics, got %d", sink.SpanCount()-spansBefore)
+	}
+}
+
 func TestTraceBuilder_CumulativeCountersAcrossInvocations(t *testing.T) {
 	tracesSink := new(consumertest.TracesSink)
 	metricsSink := new(consumertest.MetricsSink)
