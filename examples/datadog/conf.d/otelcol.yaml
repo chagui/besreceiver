@@ -3,6 +3,9 @@ logs:
     path: /var/log/otelcol/collector.log
     source: otelcol-bazel
     service: otelcol-bazel
+    # Read the log file from the start on first discovery, useful for debugging
+    # and local development. In production, remove this to only tail new entries.
+    start_position: beginning
     tags:
       - "env:dev"
       - "version:dev"
