@@ -11,6 +11,24 @@ import (
 
 // invocationState tracks the trace state for a single Bazel invocation.
 // All fields are owned by the TraceBuilder's run goroutine — no mutex needed.
+//
+// Ordering contract: the code assumes Bazel emits BEP events in a specific
+// order within each invocation stream:
+//
+//	BuildStarted → TargetConfigured* → ActionExecuted*/TestResult* → BuildFinished → BuildMetrics
+//
+// Three consequences if this ordering is violated:
+//
+//  1. Events before BuildStarted are dropped (no invocationState exists yet).
+//  2. ActionExecuted/TestResult arriving before their TargetConfigured are
+//     initially parented to the root span, then reparented under the correct
+//     target when TargetConfigured arrives (see recordOrphan / reparentOrphans).
+//  3. Events after BuildFinished (except BuildMetrics) are silently discarded
+//     because finalize sets flushed=true, and addTarget/addAction/addTestResult
+//     all short-circuit on that flag.
+//
+// Bazel has historically maintained this ordering in practice, and the BES gRPC
+// transport (OrderedBuildEvent) preserves stream order.
 type invocationState struct {
 	traceID       pcommon.TraceID
 	rootSpanID    pcommon.SpanID
@@ -244,8 +262,13 @@ func (s *invocationState) flushOrphaned() (ptrace.Traces, bool) {
 	return s.pendingTraces, true
 }
 
-// resolveTargetSpan looks up the target span for a label. Returns the span ID
-// and whether the target was found. When not found, falls back to rootSpanID.
+// resolveTargetSpan looks up the parent span for an action or test result.
+// It tries an exact (label, configID) match first, then a label-only match,
+// and falls back to the root span if no target has been registered yet.
+//
+// The bool return indicates whether the target was found. When false, the
+// caller records the span as an orphan so that addTarget can reparent it
+// when the TargetConfigured event arrives. See recordOrphan / reparentOrphans.
 func (s *invocationState) resolveTargetSpan(label, configID string) (pcommon.SpanID, bool) {
 	if spanID, ok := s.targets[targetKey(label, configID)]; ok {
 		return spanID, true
