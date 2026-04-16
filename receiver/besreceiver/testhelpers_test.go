@@ -5,6 +5,7 @@ import (
 	"io"
 	"testing"
 
+	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/collector/pdata/pmetric"
 	pb "google.golang.org/genproto/googleapis/devtools/build/v1"
 	"google.golang.org/grpc"
@@ -223,6 +224,33 @@ func hasMetricNamed(md pmetric.Metrics, name string) bool {
 		}
 	}
 	return false
+}
+
+// processEvents feeds a sequence of ordered build events into the trace builder,
+// failing the test on the first error.
+func processEvents(ctx context.Context, t testing.TB, tb *TraceBuilder, events ...*pb.OrderedBuildEvent) {
+	t.Helper()
+	for _, e := range events {
+		require.NoError(t, tb.ProcessOrderedBuildEvent(ctx, e))
+	}
+}
+
+// findMetricIntValue searches a Metrics payload for a metric by name and returns
+// the first data point's int value. Returns (0, false) if the metric is not found.
+func findMetricIntValue(md pmetric.Metrics, name string) (int64, bool) {
+	for i := range md.ResourceMetrics().Len() {
+		rm := md.ResourceMetrics().At(i)
+		for j := range rm.ScopeMetrics().Len() {
+			sm := rm.ScopeMetrics().At(j)
+			for k := range sm.Metrics().Len() {
+				m := sm.Metrics().At(k)
+				if m.Name() == name && m.Sum().DataPoints().Len() > 0 {
+					return m.Sum().DataPoints().At(0).IntValue(), true
+				}
+			}
+		}
+	}
+	return 0, false
 }
 
 // --- BES request helpers (used by receiver stream tests) ---

@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/collector/component/componenttest"
 	"go.opentelemetry.io/collector/config/confignet"
 	"go.opentelemetry.io/collector/consumer/consumererror"
@@ -234,31 +236,22 @@ func TestTraceBuilder_TargetConfiguredEmitsSpan(t *testing.T) {
 	defer tb.Stop()
 	ctx := context.Background()
 
-	if err := tb.ProcessOrderedBuildEvent(ctx, makeBuildStartedOBE(t, "inv-tc", "uuid-target", "build", 1)); err != nil {
-		t.Fatal(err)
-	}
-	if err := tb.ProcessOrderedBuildEvent(ctx, makeTargetConfiguredOBE(t, "inv-tc", "//pkg:lib", 2)); err != nil {
-		t.Fatal(err)
-	}
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-tc", "uuid-target", "build", 1),
+		makeTargetConfiguredOBE(t, "inv-tc", "//pkg:lib", 2),
+	)
 
 	// Spans are batched — nothing emitted yet.
-	if sink.SpanCount() != 0 {
-		t.Fatalf("expected 0 spans (batched), got %d", sink.SpanCount())
-	}
+	require.Equal(t, 0, sink.SpanCount(), "expected 0 spans (batched)")
 
-	if err := tb.ProcessOrderedBuildEvent(ctx, makeActionOBE(t, "inv-tc", "//pkg:lib", "Javac", 3, true)); err != nil {
-		t.Fatal(err)
-	}
-
-	// BuildFinished — flushes the batch.
-	if err := tb.ProcessOrderedBuildEvent(ctx, makeBuildFinishedOBE(t, "inv-tc", 4, 0, "SUCCESS")); err != nil {
-		t.Fatal(err)
-	}
+	processEvents(ctx, t, tb,
+		makeActionOBE(t, "inv-tc", "//pkg:lib", "Javac", 3, true),
+		// BuildFinished — flushes the batch.
+		makeBuildFinishedOBE(t, "inv-tc", 4, 0, "SUCCESS"),
+	)
 
 	// 3 spans in one batch: target + action + root.
-	if sink.SpanCount() != 3 {
-		t.Fatalf("expected 3 spans, got %d", sink.SpanCount())
-	}
+	require.Equal(t, 3, sink.SpanCount(), "expected 3 spans")
 
 	// Find spans by name in the batched output.
 	spans := sink.AllTraces()[0].ResourceSpans().At(0).ScopeSpans().At(0).Spans()
@@ -272,27 +265,19 @@ func TestTraceBuilder_TargetConfiguredEmitsSpan(t *testing.T) {
 		}
 	}
 
-	if targetSpan.Name() != "bazel.target" {
-		t.Fatal("expected to find bazel.target span in batch")
-	}
+	require.Equal(t, "bazel.target", targetSpan.Name(), "expected to find bazel.target span in batch")
 
 	label, ok := targetSpan.Attributes().Get("bazel.target.label")
-	if !ok || label.Str() != "//pkg:lib" {
-		t.Errorf("expected bazel.target.label=//pkg:lib, got %v", label)
-	}
+	assert.True(t, ok, "missing bazel.target.label attribute")
+	assert.Equal(t, "//pkg:lib", label.Str())
 
 	ruleKind, ok := targetSpan.Attributes().Get("bazel.target.rule_kind")
-	if !ok || ruleKind.Str() != "java_library rule" {
-		t.Errorf("expected bazel.target.rule_kind='java_library rule', got %v", ruleKind)
-	}
+	assert.True(t, ok, "missing bazel.target.rule_kind attribute")
+	assert.Equal(t, "java_library rule", ruleKind.Str())
 
 	// Verify the target's spanID is used as parent for the action.
-	if actionSpan.Name() != "bazel.action Javac" {
-		t.Fatal("expected to find 'bazel.action Javac' span in batch")
-	}
-	if actionSpan.ParentSpanID() != targetSpan.SpanID() {
-		t.Errorf("expected action parent to be target span %v, got %v", targetSpan.SpanID(), actionSpan.ParentSpanID())
-	}
+	require.Equal(t, "bazel.action Javac", actionSpan.Name(), "expected to find action span in batch")
+	assert.Equal(t, targetSpan.SpanID(), actionSpan.ParentSpanID(), "action parent should be target span")
 }
 
 func TestTraceBuilder_BuildFinishedWithFailure(t *testing.T) {
@@ -348,74 +333,49 @@ func TestIntegration_RealGRPCServer(t *testing.T) {
 	}
 
 	host := componenttest.NewNopHost()
-	if err := recv.Start(ctx, host); err != nil {
-		t.Fatalf("failed to start receiver: %v", err)
-	}
+	require.NoError(t, recv.Start(ctx, host), "failed to start receiver")
 	defer func() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		if err := recv.Shutdown(shutdownCtx); err != nil {
-			t.Errorf("shutdown error: %v", err)
-		}
+		assert.NoError(t, recv.Shutdown(shutdownCtx), "shutdown error")
 	}()
 
 	// Dial the actual address the OS assigned.
 	actualAddr := recv.Addr().String()
 	conn, err := grpc.NewClient(actualAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		t.Fatalf("failed to dial gRPC: %v", err)
-	}
+	require.NoError(t, err, "failed to dial gRPC")
 	defer func() {
-		if err := conn.Close(); err != nil {
-			t.Errorf("failed to close connection: %v", err)
-		}
+		assert.NoError(t, conn.Close(), "failed to close connection")
 	}()
 
 	client := pb.NewPublishBuildEventClient(conn)
 
 	stream, err := client.PublishBuildToolEventStream(ctx)
-	if err != nil {
-		t.Fatalf("failed to open stream: %v", err)
-	}
+	require.NoError(t, err, "failed to open stream")
 
 	sendAndACK(t, stream, makeBuildStartedReq(t, "inv-integration", "uuid-integration", "build", 1), 1)
 	sendAndACK(t, stream, makeBuildFinishedReq(t, "inv-integration", 2, 0, "SUCCESS"), 2)
 	sendAndACK(t, stream, makeBuildMetricsReq(t, "inv-integration", 3, 10000, 5000), 3)
 
-	if err := stream.CloseSend(); err != nil {
-		t.Fatalf("failed to close stream: %v", err)
-	}
+	require.NoError(t, stream.CloseSend(), "failed to close stream")
 
 	t.Run("traces", func(t *testing.T) {
-		if tracesSink.SpanCount() != 2 {
-			t.Fatalf("expected 2 spans, got %d", tracesSink.SpanCount())
-		}
+		require.Equal(t, 2, tracesSink.SpanCount(), "expected 2 spans")
 
 		span := tracesSink.AllTraces()[0].ResourceSpans().At(0).ScopeSpans().At(0).Spans().At(0)
-		if span.Name() != "bazel.build build" {
-			t.Errorf("expected span name 'bazel.build build', got %s", span.Name())
-		}
+		assert.Equal(t, "bazel.build build", span.Name())
 		cmd, ok := span.Attributes().Get("bazel.command")
-		if !ok || cmd.Str() != "build" {
-			t.Errorf("expected bazel.command=build, got %v", cmd)
-		}
+		assert.True(t, ok, "missing bazel.command attribute")
+		assert.Equal(t, "build", cmd.Str())
 	})
 
 	t.Run("metrics", func(t *testing.T) {
 		allMetrics := metricsSink.AllMetrics()
-		if len(allMetrics) != 1 {
-			t.Fatalf("expected 1 ConsumeMetrics call, got %d", len(allMetrics))
-		}
+		require.Len(t, allMetrics, 1, "expected 1 ConsumeMetrics call")
 
 		md := allMetrics[0]
-		if md.MetricCount() == 0 {
-			t.Fatal("expected metrics from BuildMetrics event, got 0")
-		}
-		if !hasMetricNamed(md, "bazel.invocation.wall_time") {
-			t.Error("expected bazel.invocation.wall_time gauge in metrics")
-		}
-		if !hasMetricNamed(md, "bazel.invocation.count") {
-			t.Error("expected bazel.invocation.count counter in metrics")
-		}
+		assert.NotZero(t, md.MetricCount(), "expected metrics from BuildMetrics event")
+		assert.True(t, hasMetricNamed(md, "bazel.invocation.wall_time"), "expected wall_time gauge")
+		assert.True(t, hasMetricNamed(md, "bazel.invocation.count"), "expected invocation count counter")
 	})
 }
