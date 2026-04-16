@@ -670,29 +670,17 @@ func TestTraceBuilder_LogsEmitted(t *testing.T) {
 	ctx := context.Background()
 
 	// Full lifecycle: Started → TargetConfigured → Action → TestResult → Finished → Metrics.
-	if err := tb.ProcessOrderedBuildEvent(ctx, makeBuildStartedOBE(t, "inv-log", "uuid-log", "test", 1)); err != nil {
-		t.Fatal(err)
-	}
-	if err := tb.ProcessOrderedBuildEvent(ctx, makeTargetConfiguredOBE(t, "inv-log", "//pkg:lib", 2)); err != nil {
-		t.Fatal(err)
-	}
-	if err := tb.ProcessOrderedBuildEvent(ctx, makeActionOBE(t, "inv-log", "//pkg:lib", "Javac", 3, true)); err != nil {
-		t.Fatal(err)
-	}
-	if err := tb.ProcessOrderedBuildEvent(ctx, makeTestResultOBE(t, "inv-log", "//pkg:test", 4, bep.TestStatus_PASSED)); err != nil {
-		t.Fatal(err)
-	}
-	if err := tb.ProcessOrderedBuildEvent(ctx, makeBuildFinishedOBE(t, "inv-log", 5, 0, "SUCCESS")); err != nil {
-		t.Fatal(err)
-	}
-	if err := tb.ProcessOrderedBuildEvent(ctx, makeBuildMetricsOBE(t, "inv-log", 6, 10000, 5000)); err != nil {
-		t.Fatal(err)
-	}
+	processEvents(t, tb, ctx,
+		makeBuildStartedOBE(t, "inv-log", "uuid-log", "test", 1),
+		makeTargetConfiguredOBE(t, "inv-log", "//pkg:lib", 2),
+		makeActionOBE(t, "inv-log", "//pkg:lib", "Javac", 3, true),
+		makeTestResultOBE(t, "inv-log", "//pkg:test", 4, bep.TestStatus_PASSED),
+		makeBuildFinishedOBE(t, "inv-log", 5, 0, "SUCCESS"),
+		makeBuildMetricsOBE(t, "inv-log", 6, 10000, 5000),
+	)
 
 	// 6 events → 6 log records.
-	if logsSink.LogRecordCount() != 6 {
-		t.Fatalf("expected 6 log records, got %d", logsSink.LogRecordCount())
-	}
+	require.Equal(t, 6, logsSink.LogRecordCount(), "expected 6 log records")
 
 	// Verify event names in order.
 	expectedEvents := []string{
@@ -703,46 +691,33 @@ func TestTraceBuilder_LogsEmitted(t *testing.T) {
 		"bazel.build.finished",
 		"bazel.build.metrics",
 	}
+	expectedTraceID := traceIDFromUUID("uuid-log")
 	for i, logs := range logsSink.AllLogs() {
 		lr := logs.ResourceLogs().At(0).ScopeLogs().At(0).LogRecords().At(0)
+
 		eventName, ok := lr.Attributes().Get("event.name")
-		if !ok {
-			t.Errorf("log record %d: missing event.name attribute", i)
-			continue
-		}
-		if eventName.Str() != expectedEvents[i] {
-			t.Errorf("log record %d: expected event.name=%q, got %q", i, expectedEvents[i], eventName.Str())
-		}
+		require.True(t, ok, "log record %d: missing event.name attribute", i)
+		assert.Equal(t, expectedEvents[i], eventName.Str(), "log record %d: event.name", i)
 
 		// All log records should have the invocation ID.
 		invID, ok := lr.Attributes().Get("bazel.invocation_id")
-		if !ok || invID.Str() != "inv-log" {
-			t.Errorf("log record %d: expected bazel.invocation_id=inv-log, got %v", i, invID)
-		}
+		assert.True(t, ok, "log record %d: missing bazel.invocation_id", i)
+		assert.Equal(t, "inv-log", invID.Str(), "log record %d: bazel.invocation_id", i)
 
 		// All log records should have the trace ID for correlation.
-		expectedTraceID := traceIDFromUUID("uuid-log")
-		if lr.TraceID() != expectedTraceID {
-			t.Errorf("log record %d: expected traceID %v, got %v", i, expectedTraceID, lr.TraceID())
-		}
+		assert.Equal(t, expectedTraceID, lr.TraceID(), "log record %d: traceID", i)
 
 		// Resource should have service.name=bazel.
 		svc, ok := logs.ResourceLogs().At(0).Resource().Attributes().Get("service.name")
-		if !ok || svc.Str() != "bazel" {
-			t.Errorf("log record %d: expected service.name=bazel, got %v", i, svc)
-		}
+		assert.True(t, ok, "log record %d: missing service.name", i)
+		assert.Equal(t, "bazel", svc.Str(), "log record %d: service.name", i)
 
 		// Scope should be besreceiver.
-		scope := logs.ResourceLogs().At(0).ScopeLogs().At(0).Scope().Name()
-		if scope != "besreceiver" {
-			t.Errorf("log record %d: expected scope=besreceiver, got %q", i, scope)
-		}
+		assert.Equal(t, "besreceiver", logs.ResourceLogs().At(0).ScopeLogs().At(0).Scope().Name(), "log record %d: scope", i)
 	}
 
 	// Traces should also be emitted normally.
-	if tracesSink.SpanCount() == 0 {
-		t.Error("expected traces to be emitted alongside logs")
-	}
+	assert.NotZero(t, tracesSink.SpanCount(), "expected traces to be emitted alongside logs")
 }
 
 func TestTraceBuilder_LogsOnly(t *testing.T) {
@@ -1037,60 +1012,32 @@ func TestTraceBuilder_CumulativeCountersAcrossInvocations(t *testing.T) {
 	ctx := context.Background()
 
 	// First invocation.
-	if err := tb.ProcessOrderedBuildEvent(ctx, makeBuildStartedOBE(t, "inv-c1", "uuid-c1", "build", 1)); err != nil {
-		t.Fatal(err)
-	}
-	if err := tb.ProcessOrderedBuildEvent(ctx, makeBuildFinishedOBE(t, "inv-c1", 2, 0, "SUCCESS")); err != nil {
-		t.Fatal(err)
-	}
-	if err := tb.ProcessOrderedBuildEvent(ctx, makeBuildMetricsOBE(t, "inv-c1", 3, 10000, 5000)); err != nil {
-		t.Fatal(err)
-	}
+	processEvents(t, tb, ctx,
+		makeBuildStartedOBE(t, "inv-c1", "uuid-c1", "build", 1),
+		makeBuildFinishedOBE(t, "inv-c1", 2, 0, "SUCCESS"),
+		makeBuildMetricsOBE(t, "inv-c1", 3, 10000, 5000),
+	)
 
 	// Second invocation.
-	if err := tb.ProcessOrderedBuildEvent(ctx, makeBuildStartedOBE(t, "inv-c2", "uuid-c2", "test", 1)); err != nil {
-		t.Fatal(err)
-	}
-	if err := tb.ProcessOrderedBuildEvent(ctx, makeBuildFinishedOBE(t, "inv-c2", 2, 0, "SUCCESS")); err != nil {
-		t.Fatal(err)
-	}
-	if err := tb.ProcessOrderedBuildEvent(ctx, makeBuildMetricsOBE(t, "inv-c2", 3, 20000, 8000)); err != nil {
-		t.Fatal(err)
-	}
+	processEvents(t, tb, ctx,
+		makeBuildStartedOBE(t, "inv-c2", "uuid-c2", "test", 1),
+		makeBuildFinishedOBE(t, "inv-c2", 2, 0, "SUCCESS"),
+		makeBuildMetricsOBE(t, "inv-c2", 3, 20000, 8000),
+	)
 
 	// Should have 2 ConsumeMetrics calls (one per BuildMetrics event).
 	allMetrics := metricsSink.AllMetrics()
-	if len(allMetrics) != 2 {
-		t.Fatalf("expected 2 ConsumeMetrics calls, got %d", len(allMetrics))
-	}
+	require.Len(t, allMetrics, 2, "expected 2 ConsumeMetrics calls")
 
 	// Find the cumulative invocation count in the second batch — should be 2.
 	lastMD := allMetrics[1]
-	found := false
-	for i := range lastMD.ResourceMetrics().Len() {
-		rm := lastMD.ResourceMetrics().At(i)
-		for j := range rm.ScopeMetrics().Len() {
-			sm := rm.ScopeMetrics().At(j)
-			for k := range sm.Metrics().Len() {
-				m := sm.Metrics().At(k)
-				if m.Name() == "bazel.invocation.count" {
-					found = true
-					dp := m.Sum().DataPoints().At(0)
-					if dp.IntValue() != 2 {
-						t.Errorf("expected invocation count=2 after two builds, got %d", dp.IntValue())
-					}
-				}
-				if m.Name() == "bazel.invocation.wall_time.total" {
-					dp := m.Sum().DataPoints().At(0)
-					if dp.IntValue() != 30000 {
-						t.Errorf("expected total wall_time=30000, got %d", dp.IntValue())
-					}
-				}
-			}
-		}
-	}
-	if !found {
-		t.Error("expected to find bazel.invocation.count metric in second batch")
+
+	invCount, found := findMetricIntValue(lastMD, "bazel.invocation.count")
+	require.True(t, found, "expected to find bazel.invocation.count metric in second batch")
+	assert.Equal(t, int64(2), invCount, "expected invocation count=2 after two builds")
+
+	if wallTime, found := findMetricIntValue(lastMD, "bazel.invocation.wall_time.total"); found {
+		assert.Equal(t, int64(30000), wallTime, "expected total wall_time=30000")
 	}
 }
 
