@@ -5,18 +5,21 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
-	bep "github.com/chagui/besreceiver/internal/bep/buildeventstream"
-	"github.com/chagui/besreceiver/internal/besio"
+	pb "google.golang.org/genproto/googleapis/devtools/build/v1"
 	"google.golang.org/protobuf/encoding/prototext"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
 
-	pb "google.golang.org/genproto/googleapis/devtools/build/v1"
+	bep "github.com/chagui/besreceiver/internal/bep/buildeventstream"
+	"github.com/chagui/besreceiver/internal/besio"
 )
 
+const expectedArgs = 3
+
 func main() {
-	if len(os.Args) != 3 {
+	if len(os.Args) != expectedArgs {
 		fmt.Fprintf(os.Stderr, "usage: besdiff <file1> <file2>\n")
 		os.Exit(1)
 	}
@@ -39,7 +42,11 @@ func main() {
 	fmt.Println("=== BEP event type sequence ===")
 	fmt.Printf("A: %d BEP events, B: %d BEP events\n\n", len(eventsA), len(eventsB))
 
-	// Count event types.
+	printTypeCounts(eventsA, eventsB)
+	printStructuralDiffs(eventsA, eventsB)
+}
+
+func printTypeCounts(eventsA, eventsB []eventInfo) {
 	countsA := countTypes(eventsA)
 	countsB := countTypes(eventsB)
 
@@ -62,16 +69,14 @@ func main() {
 		}
 		fmt.Printf("%-50s %5d %5d %s\n", t, ca, cb, delta)
 	}
+}
 
-	// Show structural diffs: events only in one side, or different BEP type at same index.
+func printStructuralDiffs(eventsA, eventsB []eventInfo) {
 	fmt.Println("\n=== Structural differences (ignoring timestamps/UUIDs) ===")
-	max := len(eventsA)
-	if len(eventsB) > max {
-		max = len(eventsB)
-	}
+	total := max(len(eventsA), len(eventsB))
 	diffs := 0
 	opts := prototext.MarshalOptions{Multiline: true, Indent: "  "}
-	for i := 0; i < max; i++ {
+	for i := range total {
 		if i >= len(eventsA) {
 			diffs++
 			fmt.Printf("Message %d: only in B — %s\n", i, eventsB[i].eventType)
@@ -107,7 +112,7 @@ type eventInfo struct {
 }
 
 func extractBEPTypes(reqs []*pb.PublishBuildToolEventStreamRequest) []eventInfo {
-	var events []eventInfo
+	events := make([]eventInfo, 0, len(reqs))
 	for _, req := range reqs {
 		obe := req.GetOrderedBuildEvent()
 		if obe == nil {
@@ -147,12 +152,12 @@ func parseBEP(a *anypb.Any) *bep.BuildEvent {
 	return &be
 }
 
-func bepEventType(be *bep.BuildEvent) string {
+func bepEventType(be *bep.BuildEvent) string { //nolint:gocyclo,cyclop // type switch over BEP event IDs is inherently branchy
 	id := be.GetId()
 	if id == nil {
 		return "no_id"
 	}
-	switch v := id.Id.(type) {
+	switch v := id.GetId().(type) {
 	case *bep.BuildEventId_Started:
 		return "Started"
 	case *bep.BuildEventId_UnstructuredCommandLine:
@@ -191,7 +196,7 @@ func bepEventType(be *bep.BuildEvent) string {
 	case *bep.BuildEventId_BuildToolLogs:
 		return "BuildToolLogs"
 	default:
-		return fmt.Sprintf("other(%T)", id.Id)
+		return fmt.Sprintf("other(%T)", id.GetId())
 	}
 }
 
@@ -204,10 +209,14 @@ func countTypes(events []eventInfo) map[string]int {
 }
 
 func loadStream(path string) ([]*pb.PublishBuildToolEventStreamRequest, error) {
-	f, err := os.Open(path)
+	f, err := os.Open(filepath.Clean(path))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("opening %s: %w", path, err)
 	}
 	defer f.Close()
-	return besio.ReadStream(f)
+	reqs, err := besio.ReadStream(f)
+	if err != nil {
+		return nil, fmt.Errorf("reading stream from %s: %w", path, err)
+	}
+	return reqs, nil
 }
