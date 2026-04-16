@@ -1,7 +1,9 @@
 # besreceiver
 
+[![CI](https://github.com/chagui/besreceiver/actions/workflows/ci.yml/badge.svg)](https://github.com/chagui/besreceiver/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/chagui/besreceiver.svg)](https://pkg.go.dev/github.com/chagui/besreceiver)
+[![Go Report Card](https://goreportcard.com/badge/github.com/chagui/besreceiver)](https://goreportcard.com/report/github.com/chagui/besreceiver)
 ![Stability: Alpha](https://img.shields.io/badge/stability-alpha-orange)
-![Go](https://img.shields.io/badge/Go-1.26-blue)
 
 An OpenTelemetry Collector custom receiver designed to receive [Bazel Build Event Protocol (BEP)](https://bazel.build/remote/bep) streams via the BES gRPC API and converts them into the OpenTelemetry trace model. Bazel builds become trace flamegraphs in Datadog, Tempo, Jaeger, or any OTLP backend.
 
