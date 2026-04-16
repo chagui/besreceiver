@@ -3,9 +3,9 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
 
 	pb "google.golang.org/genproto/googleapis/devtools/build/v1"
 	"google.golang.org/protobuf/encoding/prototext"
@@ -16,20 +16,18 @@ import (
 	"github.com/chagui/besreceiver/internal/besio"
 )
 
-const expectedArgs = 3
-
 func main() {
-	if len(os.Args) != expectedArgs {
+	flag.Parse()
+	if flag.NArg() != 2 { //nolint:mnd // exactly two positional args: file1 and file2
 		fmt.Fprintf(os.Stderr, "usage: besdiff <file1> <file2>\n")
 		os.Exit(1)
 	}
-	pathA, pathB := os.Args[1], os.Args[2]
-	a, err := loadStream(pathA)
+	a, err := loadStream(flag.Arg(0))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "loading:", err)
 		os.Exit(1)
 	}
-	b, err := loadStream(pathB)
+	b, err := loadStream(flag.Arg(1))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "loading:", err)
 		os.Exit(1)
@@ -158,15 +156,16 @@ func bepEventType(be *bep.BuildEvent) string { //nolint:gocyclo,cyclop // type s
 	if id == nil {
 		return "no_id"
 	}
-	switch v := id.GetId().(type) {
+	idVal := id.GetId()
+	if idVal == nil {
+		return "no_id"
+	}
+	switch v := idVal.(type) {
 	case *bep.BuildEventId_Started:
 		return "Started"
 	case *bep.BuildEventId_UnstructuredCommandLine:
 		return "UnstructuredCommandLine"
 	case *bep.BuildEventId_StructuredCommandLine:
-		if v.StructuredCommandLine == nil {
-			return "StructuredCommandLine()"
-		}
 		return fmt.Sprintf("StructuredCommandLine(%s)", v.StructuredCommandLine.GetCommandLineLabel())
 	case *bep.BuildEventId_WorkspaceStatus:
 		return "WorkspaceStatus"
@@ -200,7 +199,7 @@ func bepEventType(be *bep.BuildEvent) string { //nolint:gocyclo,cyclop // type s
 	case *bep.BuildEventId_BuildToolLogs:
 		return "BuildToolLogs"
 	default:
-		return fmt.Sprintf("other(%T)", id.GetId())
+		return fmt.Sprintf("other(%T)", idVal)
 	}
 }
 
@@ -213,7 +212,7 @@ func countTypes(events []eventInfo) map[string]int {
 }
 
 func loadStream(path string) ([]*pb.PublishBuildToolEventStreamRequest, error) {
-	f, err := os.Open(filepath.Clean(path))
+	f, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("opening %s: %w", path, err)
 	}
