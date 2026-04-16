@@ -236,7 +236,7 @@ func TestTraceBuilder_TargetConfiguredEmitsSpan(t *testing.T) {
 	defer tb.Stop()
 	ctx := context.Background()
 
-	processEvents(t, tb, ctx,
+	processEvents(ctx, t, tb,
 		makeBuildStartedOBE(t, "inv-tc", "uuid-target", "build", 1),
 		makeTargetConfiguredOBE(t, "inv-tc", "//pkg:lib", 2),
 	)
@@ -244,7 +244,7 @@ func TestTraceBuilder_TargetConfiguredEmitsSpan(t *testing.T) {
 	// Spans are batched — nothing emitted yet.
 	require.Equal(t, 0, sink.SpanCount(), "expected 0 spans (batched)")
 
-	processEvents(t, tb, ctx,
+	processEvents(ctx, t, tb,
 		makeActionOBE(t, "inv-tc", "//pkg:lib", "Javac", 3, true),
 		// BuildFinished — flushes the batch.
 		makeBuildFinishedOBE(t, "inv-tc", 4, 0, "SUCCESS"),

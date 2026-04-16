@@ -670,7 +670,7 @@ func TestTraceBuilder_LogsEmitted(t *testing.T) {
 	ctx := context.Background()
 
 	// Full lifecycle: Started → TargetConfigured → Action → TestResult → Finished → Metrics.
-	processEvents(t, tb, ctx,
+	processEvents(ctx, t, tb,
 		makeBuildStartedOBE(t, "inv-log", "uuid-log", "test", 1),
 		makeTargetConfiguredOBE(t, "inv-log", "//pkg:lib", 2),
 		makeActionOBE(t, "inv-log", "//pkg:lib", "Javac", 3, true),
@@ -1012,14 +1012,14 @@ func TestTraceBuilder_CumulativeCountersAcrossInvocations(t *testing.T) {
 	ctx := context.Background()
 
 	// First invocation.
-	processEvents(t, tb, ctx,
+	processEvents(ctx, t, tb,
 		makeBuildStartedOBE(t, "inv-c1", "uuid-c1", "build", 1),
 		makeBuildFinishedOBE(t, "inv-c1", 2, 0, "SUCCESS"),
 		makeBuildMetricsOBE(t, "inv-c1", 3, 10000, 5000),
 	)
 
 	// Second invocation.
-	processEvents(t, tb, ctx,
+	processEvents(ctx, t, tb,
 		makeBuildStartedOBE(t, "inv-c2", "uuid-c2", "test", 1),
 		makeBuildFinishedOBE(t, "inv-c2", 2, 0, "SUCCESS"),
 		makeBuildMetricsOBE(t, "inv-c2", 3, 20000, 8000),

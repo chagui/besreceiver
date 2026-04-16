@@ -228,7 +228,7 @@ func hasMetricNamed(md pmetric.Metrics, name string) bool {
 
 // processEvents feeds a sequence of ordered build events into the trace builder,
 // failing the test on the first error.
-func processEvents(t testing.TB, tb *TraceBuilder, ctx context.Context, events ...*pb.OrderedBuildEvent) {
+func processEvents(ctx context.Context, t testing.TB, tb *TraceBuilder, events ...*pb.OrderedBuildEvent) {
 	t.Helper()
 	for _, e := range events {
 		require.NoError(t, tb.ProcessOrderedBuildEvent(ctx, e))
