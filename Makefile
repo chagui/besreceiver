@@ -1,5 +1,5 @@
 .PHONY: all build test test-short test-cover test-bench test-e2e lint vet clean fuzz fix generate ocb ci docker \
-       compose-build compose-up compose-down compose-clean example record record-fixtures agent-status nilaway deadcode
+       compose-build compose-up compose-down compose-clean example record record-fixtures agent-status nilaway deadcode changelog
 
 # Use absolute path: GNU Make 3.81 (macOS default) doesn't propagate export PATH to recipe shells.
 GOTESTSUM := $(shell go env GOPATH)/bin/gotestsum
@@ -132,3 +132,7 @@ record-fixtures:
 ## agent-status: Show Datadog Agent status
 agent-status:
 	$(COMPOSE) exec dd-agent agent status
+
+## changelog: Generate CHANGELOG.md from conventional commits
+changelog:
+	git-cliff -o CHANGELOG.md

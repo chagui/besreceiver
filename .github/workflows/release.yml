@@ -103,10 +103,18 @@ jobs:
     needs: [binary, docker]
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Extract version from tag
         id: version
         run: echo "version=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+
+      - name: Generate release notes
+        uses: orhun/git-cliff-action@v4
+        id: changelog
+        with:
+          args: --latest --strip header
 
       - name: Download binary artifacts
         uses: actions/download-artifact@v4
@@ -125,6 +133,6 @@ jobs:
         run: |
           gh release create "${{ steps.version.outputs.version }}" \
             --title "${{ steps.version.outputs.version }}" \
-            --generate-notes \
+            --notes-file "${{ steps.changelog.outputs.changelog }}" \
             artifacts/*.tar.gz \
             artifacts/checksums.txt
