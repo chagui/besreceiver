@@ -23,14 +23,15 @@ func main() {
 		fmt.Fprintf(os.Stderr, "usage: besdiff <file1> <file2>\n")
 		os.Exit(1)
 	}
-	a, err := loadStream(os.Args[1])
+	pathA, pathB := os.Args[1], os.Args[2]
+	a, err := loadStream(pathA)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "loading %s: %v\n", os.Args[1], err)
+		fmt.Fprintln(os.Stderr, "loading:", err)
 		os.Exit(1)
 	}
-	b, err := loadStream(os.Args[2])
+	b, err := loadStream(pathB)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "loading %s: %v\n", os.Args[2], err)
+		fmt.Fprintln(os.Stderr, "loading:", err)
 		os.Exit(1)
 	}
 
@@ -163,6 +164,9 @@ func bepEventType(be *bep.BuildEvent) string { //nolint:gocyclo,cyclop // type s
 	case *bep.BuildEventId_UnstructuredCommandLine:
 		return "UnstructuredCommandLine"
 	case *bep.BuildEventId_StructuredCommandLine:
+		if v.StructuredCommandLine == nil {
+			return "StructuredCommandLine()"
+		}
 		return fmt.Sprintf("StructuredCommandLine(%s)", v.StructuredCommandLine.GetCommandLineLabel())
 	case *bep.BuildEventId_WorkspaceStatus:
 		return "WorkspaceStatus"
