@@ -1,0 +1,10 @@
+The proto files in this directory are extracted from the Bazel source tree
+(https://github.com/bazelbuild/bazel) and are Copyright The Bazel Authors.
+
+They are licensed under the Apache License, Version 2.0. You may obtain
+a copy of the License at:
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+See each individual .proto file for its specific copyright year and header.
+The VERSION file records the exact Bazel commit these files were taken from.
