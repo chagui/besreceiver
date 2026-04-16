@@ -3,6 +3,9 @@
 otelcol-bazel
 /besrecord
 
+# Generated
+CHANGELOG.md
+
 # Go
 *.exe
 *.test
