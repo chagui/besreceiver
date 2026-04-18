@@ -1,10 +1,17 @@
 extensions:
   health_check:
-    endpoint: "0.0.0.0:13133"
+    endpoint: "localhost:13133"
 
 receivers:
   bes:
-    endpoint: "0.0.0.0:8082"
+    endpoint: "localhost:8082"
+    # Uncomment to enable mutual TLS on the BES gRPC endpoint.
+    # Bazel clients must be pointed at --bes_backend=grpcs://... and configured
+    # with a matching client certificate when client_ca_file is set.
+    # tls:
+    #   cert_file: /etc/otelcol/certs/server.crt
+    #   key_file: /etc/otelcol/certs/server.key
+    #   client_ca_file: /etc/otelcol/certs/ca.crt
 
 processors:
   memory_limiter:
@@ -43,7 +50,7 @@ service:
         - pull:
             exporter:
               prometheus:
-                host: "0.0.0.0"
+                host: "localhost"
                 port: 8888
   pipelines:
     traces:

@@ -1,12 +1,16 @@
 extensions:
   health_check:
-    endpoint: "0.0.0.0:13133"
+    endpoint: "localhost:13133"
 
 receivers:
   bes:
-    endpoint: "0.0.0.0:8082"
+    endpoint: "localhost:8082"
 
 processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 512
+    spike_limit_mib: 128
   batch:
     send_batch_size: 8192
     timeout: 200ms
@@ -24,9 +28,9 @@ service:
   pipelines:
     traces:
       receivers: [bes]
-      processors: [batch]
+      processors: [memory_limiter, batch]
       exporters: [debug]
     logs:
       receivers: [bes]
-      processors: [batch]
+      processors: [memory_limiter, batch]
       exporters: [debug]
