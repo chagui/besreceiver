@@ -1,10 +1,22 @@
 extensions:
   health_check:
     endpoint: "localhost:13133"
+  # Uncomment to require a bearer token on the BES gRPC endpoint.
+  # Must also be listed in service.extensions and referenced from
+  # receivers.bes.auth.authenticator below.
+  # bearertokenauth:
+  #   scheme: "Bearer"
+  #   tokens:
+  #     - "REPLACE_WITH_SECRET_TOKEN"
+  #   # Or load from disk and hot-reload on change:
+  #   # filename: /etc/otelcol/bes-tokens.txt
 
 receivers:
   bes:
     endpoint: "localhost:8082"
+    # Uncomment alongside the bearertokenauth extension above to enforce auth.
+    # auth:
+    #   authenticator: bearertokenauth
     # Uncomment to enable mutual TLS on the BES gRPC endpoint.
     # Bazel clients must be pointed at --bes_backend=grpcs://... and configured
     # with a matching client certificate when client_ca_file is set.
@@ -22,6 +34,19 @@ processors:
     send_batch_size: 8192
     send_batch_max_size: 8192
     timeout: 200ms
+  # Uncomment and add to each pipeline's processors list (after memory_limiter,
+  # before batch) to scrub sensitive attributes before export. Regex-based
+  # value redaction is expensive — prefer blocked_key_patterns when possible.
+  # redaction:
+  #   allow_all_keys: true
+  #   blocked_key_patterns:
+  #     - ".*user.*"
+  #     - ".*email.*"
+  #     - ".*token.*"
+  #   blocked_values:
+  #     - "(?i)bearer\\s+[A-Za-z0-9._\\-]+"
+  #     - "[A-Za-z0-9._%+\\-]+@[A-Za-z0-9.\\-]+\\.[A-Za-z]{2,}"
+  #   summary: debug
 
 exporters:
   otlp_grpc/datadog:
