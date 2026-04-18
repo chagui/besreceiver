@@ -24,6 +24,21 @@ receivers:
     #   cert_file: /etc/otelcol/certs/server.crt
     #   key_file: /etc/otelcol/certs/server.key
     #   client_ca_file: /etc/otelcol/certs/ca.crt
+    # PII controls — all default to false. Gating is by content: if
+    # include_hostname is false, no hostname-like attribute is emitted
+    # regardless of which pathway it arrived on (BuildStarted.host, a
+    # BUILD_HOST workspace-status item, or a host build_metadata entry).
+    # See docs/attributes.md for the full composition model.
+    # pii:
+    #   include_hostname: false            # bazel.host + host-like workspace/metadata keys
+    #   include_username: false            # bazel.user + user-like workspace/metadata keys
+    #   include_workspace_dir: false       # bazel.workspace_directory
+    #   include_working_dir: false         # bazel.working_directory
+    #   include_command_args: false        # bazel.action.command_line (slice)
+    #   include_action_output_paths: false # bazel.action.primary_output
+    #   include_workspace_status: false    # bazel.workspace.* pathway (per-key filtered)
+    #   include_build_metadata: false      # bazel.metadata.* pathway (per-key filtered)
+    #   include_command_line: false        # bazel.command_line (coarse only)
 
 processors:
   memory_limiter:

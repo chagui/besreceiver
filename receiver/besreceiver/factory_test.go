@@ -4,6 +4,9 @@ import (
 	"context"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/collector/component/componenttest"
 	"go.opentelemetry.io/collector/consumer/consumertest"
 	"go.opentelemetry.io/collector/receiver/receivertest"
 
@@ -143,4 +146,38 @@ func TestSharedReceiverInstance(t *testing.T) {
 	if r.metricsConsumer == nil {
 		t.Error("expected metricsConsumer to be set")
 	}
+}
+
+// TestReceiver_ThreadsPIIConfig is a regression test for a wiring bug where
+// r.config.PII was parsed from YAML into r.config but never forwarded to the
+// TraceBuilder. Without this, all PII flags stayed at their zero-value
+// defaults regardless of what the operator set in the receiver config.
+func TestReceiver_ThreadsPIIConfig(t *testing.T) {
+	t.Cleanup(func() {
+		sharedReceiversMu.Lock()
+		sharedReceivers = make(map[string]*besReceiver)
+		sharedReceiversMu.Unlock()
+	})
+
+	f := NewFactory()
+	cfg := f.CreateDefaultConfig().(*Config)
+	cfg.NetAddr.Endpoint = "localhost:0"
+	cfg.PII.IncludeHostname = true
+	cfg.PII.IncludeCommandArgs = true
+
+	sink := new(consumertest.TracesSink)
+	settings := receivertest.NewNopSettings(metadata.Type)
+	recv, err := f.CreateTraces(context.Background(), settings, cfg, sink)
+	require.NoError(t, err)
+
+	require.NoError(t, recv.Start(context.Background(), componenttest.NewNopHost()))
+	t.Cleanup(func() { _ = recv.Shutdown(context.Background()) })
+
+	r := recv.(*besReceiver)
+	assert.True(t, r.traceBuilder.pii.IncludeHostname,
+		"IncludeHostname should propagate from Config.PII through TraceBuilder")
+	assert.True(t, r.traceBuilder.pii.IncludeCommandArgs,
+		"IncludeCommandArgs should propagate from Config.PII through TraceBuilder")
+	assert.False(t, r.traceBuilder.pii.IncludeUsername,
+		"unset flags should remain at zero value")
 }

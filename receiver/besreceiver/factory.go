@@ -40,6 +40,7 @@ func createDefaultConfig() component.Config {
 		},
 		InvocationTimeout: defaultInvocationTimeout,
 		ReaperInterval:    defaultReaperInterval,
+		PII:               PIIConfig{},
 	}
 }
 

@@ -19,6 +19,7 @@ import (
 	"go.opentelemetry.io/collector/pdata/ptrace"
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/types/known/anypb"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	buildpb "google.golang.org/genproto/googleapis/devtools/build/v1"
 
@@ -585,6 +586,7 @@ func TestReapStale(t *testing.T) {
 		spanIDFromIdentity("uuid-stale", "root"),
 		&bep.BuildStarted{Uuid: "uuid-stale", Command: "build"},
 		time.Now().Add(-time.Hour),
+		PIIConfig{},
 	)
 	span := state.appendSpan()
 	span.SetSpanID(spanIDFromIdentity("uuid-stale", "action", "//pkg:lib", "Javac", ""))
@@ -1357,6 +1359,7 @@ func TestTraceBuilder_Aborted_WithoutBuildFinished(t *testing.T) {
 		spanIDFromIdentity("uuid-abort-3", "root"),
 		&bep.BuildStarted{Uuid: "uuid-abort-3", Command: "build"},
 		time.Now().Add(-time.Hour),
+		PIIConfig{},
 	)
 	state.recordAbort(&bep.Aborted{Reason: bep.Aborted_TIME_OUT, Description: "deadline"})
 
@@ -1452,7 +1455,9 @@ func TestAbortReasonString_AllEnumValues(t *testing.T) {
 
 func TestWorkspaceStatusAttributesOnRootSpan(t *testing.T) {
 	sink := new(consumertest.TracesSink)
-	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{
+		PII: PIIConfig{IncludeWorkspaceStatus: true},
+	})
 	tb.Start()
 	defer tb.Stop()
 	ctx := context.Background()
@@ -1479,7 +1484,9 @@ func TestWorkspaceStatusAttributesOnRootSpan(t *testing.T) {
 
 func TestBuildMetadataAttributesOnRootSpan(t *testing.T) {
 	sink := new(consumertest.TracesSink)
-	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{
+		PII: PIIConfig{IncludeBuildMetadata: true},
+	})
 	tb.Start()
 	defer tb.Stop()
 	ctx := context.Background()
@@ -1506,7 +1513,9 @@ func TestBuildMetadataAttributesOnRootSpan(t *testing.T) {
 
 func TestWorkspaceItemsCappedAt30(t *testing.T) {
 	sink := new(consumertest.TracesSink)
-	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{
+		PII: PIIConfig{IncludeWorkspaceStatus: true},
+	})
 	tb.Start()
 	defer tb.Stop()
 	ctx := context.Background()
@@ -1535,7 +1544,9 @@ func TestWorkspaceItemsCappedAt30(t *testing.T) {
 
 func TestBuildMetadataCappedAt20(t *testing.T) {
 	sink := new(consumertest.TracesSink)
-	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{
+		PII: PIIConfig{IncludeBuildMetadata: true},
+	})
 	tb.Start()
 	defer tb.Stop()
 	ctx := context.Background()
@@ -1564,7 +1575,9 @@ func TestBuildMetadataCappedAt20(t *testing.T) {
 
 func TestAttributeValueTruncatedAt256Chars(t *testing.T) {
 	sink := new(consumertest.TracesSink)
-	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{
+		PII: PIIConfig{IncludeWorkspaceStatus: true},
+	})
 	tb.Start()
 	defer tb.Stop()
 	ctx := context.Background()
@@ -1981,7 +1994,9 @@ func TestTraceBuilder_OptionsParsed_RootAttrs(t *testing.T) {
 
 func TestTraceBuilder_StructuredCommandLine_OriginalOnly(t *testing.T) {
 	sink := new(consumertest.TracesSink)
-	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{
+		PII: PIIConfig{IncludeCommandLine: true},
+	})
 	tb.Start()
 	defer tb.Stop()
 	ctx := context.Background()
@@ -2013,9 +2028,444 @@ func TestTraceBuilder_StructuredCommandLine_OriginalOnly(t *testing.T) {
 	assert.NotContains(t, cmd.Str(), "canonical", "canonical variant must not leak into output")
 }
 
+// --- PII controls (issue #14) ---
+
+// makePIIRichBuildStartedOBE emits a BuildStarted event populated with every
+// PII-gated field so the matrix tests can assert each flag individually.
+func makePIIRichBuildStartedOBE(t *testing.T, invID string, seqNum int64) *buildpb.OrderedBuildEvent {
+	return makeOrderedBuildEvent(t, invID, seqNum, &bep.BuildEvent{
+		Id: &bep.BuildEventId{
+			Id: &bep.BuildEventId_Started{Started: &bep.BuildEventId_BuildStartedId{}},
+		},
+		Payload: &bep.BuildEvent_Started{
+			Started: &bep.BuildStarted{
+				Uuid:               "uuid-pii",
+				Command:            "build",
+				StartTime:          &timestamppb.Timestamp{Seconds: 1700000000},
+				Host:               "ci-runner-42",
+				User:               "jenkins",
+				WorkspaceDirectory: "/home/jenkins/workspace/foo",
+				WorkingDirectory:   "/home/jenkins/workspace/foo/subdir",
+				BuildToolVersion:   "7.0.0",
+			},
+		},
+	})
+}
+
+// makePIIRichActionOBE emits an ActionExecuted with the gated PII fields set.
+func makePIIRichActionOBE(t *testing.T, invID string, seqNum int64) *buildpb.OrderedBuildEvent {
+	return makeOrderedBuildEvent(t, invID, seqNum, &bep.BuildEvent{
+		Id: &bep.BuildEventId{
+			Id: &bep.BuildEventId_ActionCompleted{
+				ActionCompleted: &bep.BuildEventId_ActionCompletedId{Label: "//pkg:lib"},
+			},
+		},
+		Payload: &bep.BuildEvent_Action{
+			Action: &bep.ActionExecuted{
+				Success:     true,
+				Type:        "Javac",
+				CommandLine: []string{"javac", "-d", "out", "Foo.java"},
+				PrimaryOutput: &bep.File{
+					Name: "pkg/Foo.class",
+				},
+				StartTime: &timestamppb.Timestamp{Seconds: 1700000001},
+				EndTime:   &timestamppb.Timestamp{Seconds: 1700000002},
+			},
+		},
+	})
+}
+
+func findActionSpan(t *testing.T, sink *consumertest.TracesSink, label string) ptrace.Span {
+	t.Helper()
+	var match ptrace.Span
+	var found int
+	for _, tr := range sink.AllTraces() {
+		for i := range tr.ResourceSpans().Len() {
+			rs := tr.ResourceSpans().At(i)
+			for j := range rs.ScopeSpans().Len() {
+				ss := rs.ScopeSpans().At(j)
+				for k := range ss.Spans().Len() {
+					s := ss.Spans().At(k)
+					if !strings.HasPrefix(s.Name(), "bazel.action") {
+						continue
+					}
+					got, ok := s.Attributes().Get("bazel.target.label")
+					if ok && got.Str() == label {
+						match = s
+						found++
+					}
+				}
+			}
+		}
+	}
+	require.Equal(t, 1, found, "expected exactly one bazel.action span for %q", label)
+	return match
+}
+
+func runPIITestStream(t *testing.T, pii PIIConfig) *consumertest.TracesSink {
+	t.Helper()
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{PII: pii})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	processEvents(ctx, t, tb,
+		makePIIRichBuildStartedOBE(t, "inv-pii", 1),
+		makeTargetConfiguredOBE(t, "inv-pii", "//pkg:lib", 2),
+		makePIIRichActionOBE(t, "inv-pii", 3),
+		makeBuildFinishedOBE(t, "inv-pii", 4, 0, "SUCCESS"),
+	)
+	return sink
+}
+
+func TestPII_DefaultRedactsEverything(t *testing.T) {
+	sink := runPIITestStream(t, PIIConfig{})
+
+	root := findRootSpan(t, sink)
+	for _, key := range []string{"bazel.host", "bazel.user", "bazel.workspace_directory", "bazel.working_directory"} {
+		_, has := root.Attributes().Get(key)
+		assert.False(t, has, "default config must not emit %s", key)
+	}
+
+	// Non-PII attrs remain visible regardless of PII config.
+	cmd, ok := root.Attributes().Get("bazel.command")
+	require.True(t, ok)
+	assert.Equal(t, "build", cmd.Str())
+
+	action := findActionSpan(t, sink, "//pkg:lib")
+	_, hasCmd := action.Attributes().Get("bazel.action.command_line")
+	assert.False(t, hasCmd)
+	_, hasOut := action.Attributes().Get("bazel.action.primary_output")
+	assert.False(t, hasOut)
+}
+
+func TestPII_Matrix(t *testing.T) {
+	cases := []struct {
+		name       string
+		pii        PIIConfig
+		rootAttr   string
+		rootWant   string
+		actionAttr string
+		actionWant string
+	}{
+		{"hostname", PIIConfig{IncludeHostname: true}, "bazel.host", "ci-runner-42", "", ""},
+		{"username", PIIConfig{IncludeUsername: true}, "bazel.user", "jenkins", "", ""},
+		{"workspace_dir", PIIConfig{IncludeWorkspaceDir: true}, "bazel.workspace_directory", "/home/jenkins/workspace/foo", "", ""},
+		{"working_dir", PIIConfig{IncludeWorkingDir: true}, "bazel.working_directory", "/home/jenkins/workspace/foo/subdir", "", ""},
+		{"action_output", PIIConfig{IncludeActionOutputPaths: true}, "", "", "bazel.action.primary_output", "pkg/Foo.class"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sink := runPIITestStream(t, tc.pii)
+			if tc.rootAttr != "" {
+				root := findRootSpan(t, sink)
+				got, ok := root.Attributes().Get(tc.rootAttr)
+				require.True(t, ok, "expected %s on root span", tc.rootAttr)
+				assert.Equal(t, tc.rootWant, got.Str())
+			}
+			if tc.actionAttr != "" {
+				action := findActionSpan(t, sink, "//pkg:lib")
+				got, ok := action.Attributes().Get(tc.actionAttr)
+				require.True(t, ok, "expected %s on action span", tc.actionAttr)
+				assert.Equal(t, tc.actionWant, got.Str())
+			}
+		})
+	}
+}
+
+func TestPII_CommandArgs_Slice(t *testing.T) {
+	sink := runPIITestStream(t, PIIConfig{IncludeCommandArgs: true})
+	action := findActionSpan(t, sink, "//pkg:lib")
+	slice, ok := action.Attributes().Get("bazel.action.command_line")
+	require.True(t, ok)
+	require.Equal(t, pcommon.ValueTypeSlice, slice.Type())
+	require.Equal(t, 4, slice.Slice().Len())
+	assert.Equal(t, "javac", slice.Slice().At(0).Str())
+	assert.Equal(t, "Foo.java", slice.Slice().At(3).Str())
+}
+
+func TestPII_AllFlags_On(t *testing.T) {
+	sink := runPIITestStream(t, PIIConfig{
+		IncludeHostname:          true,
+		IncludeUsername:          true,
+		IncludeWorkspaceDir:      true,
+		IncludeWorkingDir:        true,
+		IncludeCommandArgs:       true,
+		IncludeActionOutputPaths: true,
+	})
+
+	root := findRootSpan(t, sink)
+	for _, key := range []string{"bazel.host", "bazel.user", "bazel.workspace_directory", "bazel.working_directory"} {
+		_, has := root.Attributes().Get(key)
+		assert.True(t, has, "expected %s with all flags on", key)
+	}
+
+	action := findActionSpan(t, sink, "//pkg:lib")
+	_, hasCmd := action.Attributes().Get("bazel.action.command_line")
+	assert.True(t, hasCmd)
+	_, hasOut := action.Attributes().Get("bazel.action.primary_output")
+	assert.True(t, hasOut)
+}
+
+func TestPII_WorkspaceDirectory_RequiresFlag(t *testing.T) {
+	// Back-compat documentation test for the breaking change: bazel.workspace_directory
+	// is no longer emitted by default and requires include_workspace_dir.
+	sinkDefault := runPIITestStream(t, PIIConfig{})
+	root := findRootSpan(t, sinkDefault)
+	_, hasDefault := root.Attributes().Get("bazel.workspace_directory")
+	assert.False(t, hasDefault, "default config must NOT emit bazel.workspace_directory (breaking change from prior versions)")
+
+	sinkEnabled := runPIITestStream(t, PIIConfig{IncludeWorkspaceDir: true})
+	rootEnabled := findRootSpan(t, sinkEnabled)
+	got, ok := rootEnabled.Attributes().Get("bazel.workspace_directory")
+	require.True(t, ok)
+	assert.Equal(t, "/home/jenkins/workspace/foo", got.Str())
+}
+
+// runFullPIITestStream runs an event stream exercising every PII-sensitive
+// pathway: BuildStarted with host/user/dirs, WorkspaceStatus with host-like
+// and user-like keys plus a safe key, BuildMetadata with a PII-like user
+// key plus a safe key, and a StructuredCommandLine. Used by the composition
+// matrix tests below.
+func runFullPIITestStream(t *testing.T, pii PIIConfig) *consumertest.TracesSink {
+	t.Helper()
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{PII: pii})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	processEvents(ctx, t, tb,
+		makePIIRichBuildStartedOBE(t, "inv-full-pii", 1),
+		makeWorkspaceStatusOBE(t, "inv-full-pii", 2, map[string]string{
+			"STABLE_GIT_BRANCH": "main",
+			"BUILD_HOST":        "ws-host",
+			"BUILD_USER":        "ws-user",
+			"WORKING_DIRECTORY": "/ws-wd",
+		}),
+		makeBuildMetadataOBE(t, "inv-full-pii", 3, map[string]string{
+			"pr_number": "1337",
+			"user":      "md-user",
+			"host":      "md-host",
+		}),
+		makeStructuredCommandLineOBE(t, "inv-full-pii", "original", []*commandline.CommandLineSection{
+			chunkSection("bazel"),
+			chunkSection("build"),
+			chunkSection("//..."),
+		}, 4),
+		makeBuildFinishedOBE(t, "inv-full-pii", 5, 0, "SUCCESS"),
+	)
+	return sink
+}
+
+// TestPII_WorkspaceStatusComposition verifies that the coarse
+// IncludeWorkspaceStatus gate composes with per-field PII flags: the
+// pathway can be opened while individual host/user/dir keys are still
+// filtered out per the finer flags.
+func TestPII_WorkspaceStatusComposition(t *testing.T) {
+	cases := []struct {
+		name string
+		pii  PIIConfig
+		// want["bazel.workspace.<k>"] = true  → attribute must exist
+		// want["bazel.workspace.<k>"] = false → attribute must NOT exist
+		want map[string]bool
+	}{
+		{
+			name: "status gate off suppresses everything",
+			pii:  PIIConfig{IncludeHostname: true, IncludeUsername: true, IncludeWorkingDir: true},
+			want: map[string]bool{
+				"bazel.workspace.stable_git_branch": false,
+				"bazel.workspace.build_host":        false,
+				"bazel.workspace.build_user":        false,
+				"bazel.workspace.working_directory": false,
+			},
+		},
+		{
+			name: "status gate on, all finer flags off",
+			pii:  PIIConfig{IncludeWorkspaceStatus: true},
+			want: map[string]bool{
+				"bazel.workspace.stable_git_branch": true,  // safe key passes
+				"bazel.workspace.build_host":        false, // hostname filtered
+				"bazel.workspace.build_user":        false, // username filtered
+				"bazel.workspace.working_directory": false, // working dir filtered
+			},
+		},
+		{
+			name: "status gate on, hostname on",
+			pii:  PIIConfig{IncludeWorkspaceStatus: true, IncludeHostname: true},
+			want: map[string]bool{
+				"bazel.workspace.stable_git_branch": true,
+				"bazel.workspace.build_host":        true,
+				"bazel.workspace.build_user":        false,
+				"bazel.workspace.working_directory": false,
+			},
+		},
+		{
+			name: "status gate on, username on",
+			pii:  PIIConfig{IncludeWorkspaceStatus: true, IncludeUsername: true},
+			want: map[string]bool{
+				"bazel.workspace.stable_git_branch": true,
+				"bazel.workspace.build_host":        false,
+				"bazel.workspace.build_user":        true,
+				"bazel.workspace.working_directory": false,
+			},
+		},
+		{
+			name: "status gate on, working_dir on",
+			pii:  PIIConfig{IncludeWorkspaceStatus: true, IncludeWorkingDir: true},
+			want: map[string]bool{
+				"bazel.workspace.stable_git_branch": true,
+				"bazel.workspace.build_host":        false,
+				"bazel.workspace.build_user":        false,
+				"bazel.workspace.working_directory": true,
+			},
+		},
+		{
+			name: "status gate on, all PII flags on",
+			pii: PIIConfig{
+				IncludeWorkspaceStatus: true,
+				IncludeHostname:        true,
+				IncludeUsername:        true,
+				IncludeWorkingDir:      true,
+				IncludeWorkspaceDir:    true,
+			},
+			want: map[string]bool{
+				"bazel.workspace.stable_git_branch": true,
+				"bazel.workspace.build_host":        true,
+				"bazel.workspace.build_user":        true,
+				"bazel.workspace.working_directory": true,
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sink := runFullPIITestStream(t, tc.pii)
+			root := findRootSpan(t, sink)
+			for attr, want := range tc.want {
+				_, got := root.Attributes().Get(attr)
+				assert.Equal(t, want, got, "%s: want present=%v, got present=%v", attr, want, got)
+			}
+		})
+	}
+}
+
+// TestPII_BuildMetadataComposition exercises the same composition for the
+// bazel.metadata.* pathway with a user/host key collision: when the coarse
+// gate is open, PII-like keys are still filtered per the finer flags.
+func TestPII_BuildMetadataComposition(t *testing.T) {
+	cases := []struct {
+		name string
+		pii  PIIConfig
+		want map[string]bool
+	}{
+		{
+			name: "metadata gate off suppresses everything",
+			pii:  PIIConfig{IncludeHostname: true, IncludeUsername: true},
+			want: map[string]bool{
+				"bazel.metadata.pr_number": false,
+				"bazel.metadata.host":      false,
+				"bazel.metadata.user":      false,
+			},
+		},
+		{
+			name: "metadata gate on, PII flags off",
+			pii:  PIIConfig{IncludeBuildMetadata: true},
+			want: map[string]bool{
+				"bazel.metadata.pr_number": true,  // safe key passes
+				"bazel.metadata.host":      false, // host filtered
+				"bazel.metadata.user":      false, // user filtered
+			},
+		},
+		{
+			name: "metadata + hostname",
+			pii:  PIIConfig{IncludeBuildMetadata: true, IncludeHostname: true},
+			want: map[string]bool{
+				"bazel.metadata.pr_number": true,
+				"bazel.metadata.host":      true,
+				"bazel.metadata.user":      false,
+			},
+		},
+		{
+			name: "metadata + username",
+			pii:  PIIConfig{IncludeBuildMetadata: true, IncludeUsername: true},
+			want: map[string]bool{
+				"bazel.metadata.pr_number": true,
+				"bazel.metadata.host":      false,
+				"bazel.metadata.user":      true,
+			},
+		},
+		{
+			name: "metadata + all",
+			pii:  PIIConfig{IncludeBuildMetadata: true, IncludeHostname: true, IncludeUsername: true},
+			want: map[string]bool{
+				"bazel.metadata.pr_number": true,
+				"bazel.metadata.host":      true,
+				"bazel.metadata.user":      true,
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			sink := runFullPIITestStream(t, tc.pii)
+			root := findRootSpan(t, sink)
+			for attr, want := range tc.want {
+				_, got := root.Attributes().Get(attr)
+				assert.Equal(t, want, got, "%s: want present=%v, got present=%v", attr, want, got)
+			}
+		})
+	}
+}
+
+// TestPII_CommandLine_Gated verifies bazel.command_line is all-or-nothing
+// under IncludeCommandLine. No per-key filtering is attempted; operators
+// needing finer control should use the redactionprocessor.
+func TestPII_CommandLine_Gated(t *testing.T) {
+	t.Run("default off suppresses command_line", func(t *testing.T) {
+		sink := runFullPIITestStream(t, PIIConfig{})
+		root := findRootSpan(t, sink)
+		_, has := root.Attributes().Get("bazel.command_line")
+		assert.False(t, has, "bazel.command_line must default to suppressed")
+	})
+	t.Run("flag on emits command_line", func(t *testing.T) {
+		sink := runFullPIITestStream(t, PIIConfig{IncludeCommandLine: true})
+		root := findRootSpan(t, sink)
+		got, ok := root.Attributes().Get("bazel.command_line")
+		require.True(t, ok)
+		assert.Equal(t, "bazel build //...", got.Str())
+	})
+	t.Run("other PII flags do not gate command_line", func(t *testing.T) {
+		// IncludeHostname alone should not turn command_line on.
+		sink := runFullPIITestStream(t, PIIConfig{IncludeHostname: true})
+		root := findRootSpan(t, sink)
+		_, has := root.Attributes().Get("bazel.command_line")
+		assert.False(t, has, "command_line requires its own flag")
+	})
+}
+
+// TestPII_NoDuplication_HostnameAttr catches the specific bug that motivated
+// the composition model: when IncludeHostname is true but IncludeWorkspaceStatus
+// is false, the hostname should appear exactly once (on bazel.host from
+// BuildStarted) — not duplicated via the workspace-status pathway.
+func TestPII_NoDuplication_HostnameAttr(t *testing.T) {
+	sink := runFullPIITestStream(t, PIIConfig{IncludeHostname: true})
+	root := findRootSpan(t, sink)
+
+	host, ok := root.Attributes().Get("bazel.host")
+	require.True(t, ok, "bazel.host should appear when IncludeHostname=true")
+	assert.Equal(t, "ci-runner-42", host.Str())
+
+	_, hasWs := root.Attributes().Get("bazel.workspace.build_host")
+	assert.False(t, hasWs, "workspace-status host must be suppressed when the status gate is closed")
+	_, hasMd := root.Attributes().Get("bazel.metadata.host")
+	assert.False(t, hasMd, "metadata host must be suppressed when the metadata gate is closed")
+}
+
 func TestTraceBuilder_StructuredCommandLine_Truncated(t *testing.T) {
 	sink := new(consumertest.TracesSink)
-	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{
+		PII: PIIConfig{IncludeCommandLine: true},
+	})
 	tb.Start()
 	defer tb.Stop()
 	ctx := context.Background()
