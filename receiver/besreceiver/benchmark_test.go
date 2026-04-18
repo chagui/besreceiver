@@ -7,6 +7,7 @@ import (
 
 	"go.opentelemetry.io/collector/consumer/consumertest"
 	"go.opentelemetry.io/collector/pdata/pcommon"
+	"go.opentelemetry.io/collector/pdata/ptrace"
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
@@ -97,11 +98,14 @@ func BenchmarkTraceIDFromUUID(b *testing.B) {
 func BenchmarkResolveTargetSpan(b *testing.B) {
 	state := &invocationState{
 		rootSpanID: pcommon.SpanID([8]byte{0, 0, 0, 0, 0, 0, 0, 1}),
-		targets:    make(map[string]pcommon.SpanID, 100),
+		targets:    make(map[string]ptrace.Span, 100),
 	}
+	scratch := ptrace.NewTraces().ResourceSpans().AppendEmpty().ScopeSpans().AppendEmpty().Spans()
 	for i := range 100 {
 		label := fmt.Sprintf("//pkg:target-%d", i)
-		state.targets[targetKey(label, fmt.Sprintf("cfg-%d", i))] = spanIDFromIdentity("bench", "target", label)
+		span := scratch.AppendEmpty()
+		span.SetSpanID(spanIDFromIdentity("bench", "target", label))
+		state.targets[targetKey(label, fmt.Sprintf("cfg-%d", i))] = span
 	}
 
 	b.Run("exact_match", func(b *testing.B) {

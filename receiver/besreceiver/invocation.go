@@ -35,9 +35,9 @@ import (
 type invocationState struct {
 	traceID       pcommon.TraceID
 	rootSpanID    pcommon.SpanID
-	uuid          string                    // Bazel invocation UUID, used to seed span-identity strings
-	targets       map[string]pcommon.SpanID // "label\x00configID" → spanID
-	started       *bep.BuildStarted         // buffered for deferred root span emission
+	uuid          string                 // Bazel invocation UUID, used to seed span-identity strings
+	targets       map[string]ptrace.Span // "label\x00configID" → target span handle
+	started       *bep.BuildStarted      // buffered for deferred root span emission
 	createdAt     time.Time
 	pendingTraces ptrace.Traces     // batch of spans accumulated during the build
 	scopeSpans    ptrace.ScopeSpans // reference into pendingTraces for span appending
@@ -69,7 +69,7 @@ func newInvocationState(traceID pcommon.TraceID, rootSpanID pcommon.SpanID, star
 		traceID:       traceID,
 		rootSpanID:    rootSpanID,
 		uuid:          started.GetUuid(),
-		targets:       make(map[string]pcommon.SpanID),
+		targets:       make(map[string]ptrace.Span),
 		started:       started,
 		createdAt:     now,
 		pendingTraces: traces,
@@ -94,8 +94,6 @@ func (s *invocationState) addTarget(label, ruleKind string) {
 	}
 
 	spanID := spanIDFromIdentity(s.uuid, "target", label)
-	s.targets[targetKey(label, "")] = spanID
-
 	span := s.appendSpan()
 	span.SetSpanID(spanID)
 	span.SetParentSpanID(s.rootSpanID)
@@ -106,6 +104,10 @@ func (s *invocationState) addTarget(label, ruleKind string) {
 	if ruleKind != "" {
 		span.Attributes().PutStr("bazel.target.rule_kind", ruleKind)
 	}
+
+	// Store the span handle so later TargetComplete / TestSummary events can
+	// mutate attributes on the existing target span.
+	s.targets[targetKey(label, "")] = span
 
 	// Reparent any actions/tests that arrived before this target.
 	s.reparentOrphans(label, spanID)
@@ -348,6 +350,58 @@ func (s *invocationState) addBuildMetadata(md map[string]string) {
 	}
 }
 
+// completeTarget applies TargetComplete attributes to the target span stored
+// under the given label. No-op when the target span is missing (aborted build
+// or TargetComplete arriving before TargetConfigured — same silent-degradation
+// pattern as the action-before-target case) or when the state is already
+// flushed.
+func (s *invocationState) completeTarget(label string, tc *bep.TargetComplete) {
+	if s.flushed {
+		return
+	}
+	span, ok := s.targets[targetKey(label, "")]
+	if !ok {
+		return
+	}
+	span.Attributes().PutBool("bazel.target.success", tc.GetSuccess())
+	if tc.GetTestTimeout() != nil {
+		span.Attributes().PutDouble("bazel.target.test_timeout_s", tc.GetTestTimeout().AsDuration().Seconds())
+	}
+	failureDetail := tc.GetFailureDetail().GetMessage()
+	if failureDetail != "" {
+		span.Attributes().PutStr("bazel.target.failure_detail", failureDetail)
+	}
+	span.Attributes().PutInt("bazel.target.output_group_count", int64(len(tc.GetOutputGroup())))
+	if !tc.GetSuccess() {
+		span.Status().SetCode(ptrace.StatusCodeError)
+		msg := "target failed"
+		if failureDetail != "" {
+			msg = failureDetail
+		}
+		span.Status().SetMessage(msg)
+	}
+}
+
+// summarizeTarget applies TestSummary attributes to the target span. No-op
+// when the target span is missing (non-test target or out-of-order) or when
+// the state is already flushed.
+func (s *invocationState) summarizeTarget(label string, ts *bep.TestSummary) {
+	if s.flushed {
+		return
+	}
+	span, ok := s.targets[targetKey(label, "")]
+	if !ok {
+		return
+	}
+	span.Attributes().PutStr("bazel.target.test.overall_status", ts.GetOverallStatus().String())
+	span.Attributes().PutInt("bazel.target.test.total_run_count", int64(ts.GetTotalRunCount()))
+	span.Attributes().PutInt("bazel.target.test.shard_count", int64(ts.GetShardCount()))
+	span.Attributes().PutInt("bazel.target.test.total_num_cached", int64(ts.GetTotalNumCached()))
+	if ts.GetTotalRunDuration() != nil {
+		span.Attributes().PutInt("bazel.target.test.total_run_duration_ms", ts.GetTotalRunDuration().AsDuration().Milliseconds())
+	}
+}
+
 // applyContextAttributes writes buffered WorkspaceStatus + BuildMetadata
 // entries onto the root span. Keys are emitted in sorted order for
 // deterministic attribute listings across backends.
@@ -429,11 +483,11 @@ func (s *invocationState) flushOrphaned() (ptrace.Traces, bool) {
 // caller records the span as an orphan so that addTarget can reparent it
 // when the TargetConfigured event arrives. See recordOrphan / reparentOrphans.
 func (s *invocationState) resolveTargetSpan(label, configID string) (pcommon.SpanID, bool) {
-	if spanID, ok := s.targets[targetKey(label, configID)]; ok {
-		return spanID, true
+	if span, ok := s.targets[targetKey(label, configID)]; ok {
+		return span.SpanID(), true
 	}
-	if spanID, ok := s.targets[targetKey(label, "")]; ok {
-		return spanID, true
+	if span, ok := s.targets[targetKey(label, "")]; ok {
+		return span.SpanID(), true
 	}
 	return s.rootSpanID, false
 }

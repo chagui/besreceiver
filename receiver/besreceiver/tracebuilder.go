@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -184,7 +185,7 @@ func (tb *TraceBuilder) ProcessOrderedBuildEvent(ctx context.Context, obe *pb.Or
 	}
 }
 
-//nolint:gocyclo // Flat payload dispatch: grows as the receiver handles more BEP event types. Splitting by payload family would hurt discoverability.
+//nolint:gocyclo,gocognit,cyclop // Flat payload dispatch: grows as the receiver handles more BEP event types. Splitting by payload family would hurt discoverability.
 func (tb *TraceBuilder) processEvent(ctx context.Context, invocations map[string]*invocationState, invocationID string, event *bep.BuildEvent) error {
 	tb.eventsProcessed.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("event_type", eventTypeName(event)),
@@ -239,6 +240,16 @@ func (tb *TraceBuilder) processEvent(ctx context.Context, invocations map[string
 			return nil
 		}
 		return tb.handleBuildMetadata(ctx, invocations, invocationID, p.BuildMetadata)
+	case *bep.BuildEvent_Completed:
+		if p.Completed == nil {
+			return nil
+		}
+		return tb.handleTargetComplete(ctx, invocations, invocationID, event.GetId(), p.Completed)
+	case *bep.BuildEvent_TestSummary:
+		if p.TestSummary == nil {
+			return nil
+		}
+		return tb.handleTestSummary(ctx, invocations, invocationID, event.GetId(), p.TestSummary)
 	}
 	return nil
 }
@@ -264,6 +275,10 @@ func eventTypeName(event *bep.BuildEvent) string {
 		return "workspace_status"
 	case *bep.BuildEvent_BuildMetadata:
 		return "build_metadata"
+	case *bep.BuildEvent_Completed:
+		return "target_complete"
+	case *bep.BuildEvent_TestSummary:
+		return "test_summary"
 	default:
 		return "other"
 	}
@@ -512,6 +527,61 @@ func (tb *TraceBuilder) handleBuildMetadata(_ context.Context, invocations map[s
 	tb.logger.Debug("Build metadata received",
 		zap.String("invocation_id", invocationID),
 		zap.Int("entries", len(bm.GetMetadata())),
+	)
+	return nil
+}
+
+// handleTargetComplete enriches an existing bazel.target span with outcome
+// attributes from TargetComplete. Arrives after TargetConfigured in practice;
+// no-op when the target span is missing (aborted or out-of-order).
+func (tb *TraceBuilder) handleTargetComplete(ctx context.Context, invocations map[string]*invocationState, invocationID string, eventID *bep.BuildEventId, tc *bep.TargetComplete) error {
+	state := invocations[invocationID]
+	if state == nil {
+		return nil
+	}
+	label := eventID.GetTargetCompleted().GetLabel()
+	if label == "" {
+		return nil
+	}
+	state.completeTarget(label, tc)
+
+	severity := plog.SeverityNumberInfo
+	body := fmt.Sprintf("Target completed: %s", label)
+	if !tc.GetSuccess() {
+		severity = plog.SeverityNumberError
+		body = fmt.Sprintf("Target failed: %s", label)
+	}
+	tb.emitLog(ctx, state, invocationID, "bazel.target.completed",
+		body, severity, time.Time{},
+		map[string]string{
+			"bazel.target.label":   label,
+			"bazel.target.success": strconv.FormatBool(tc.GetSuccess()),
+		},
+	)
+	return nil
+}
+
+// handleTestSummary enriches an existing bazel.target span with aggregate
+// test metrics from TestSummary. No-op for non-test targets (no summary
+// arrives) or when the target span is missing.
+func (tb *TraceBuilder) handleTestSummary(ctx context.Context, invocations map[string]*invocationState, invocationID string, eventID *bep.BuildEventId, ts *bep.TestSummary) error {
+	state := invocations[invocationID]
+	if state == nil {
+		return nil
+	}
+	label := eventID.GetTestSummary().GetLabel()
+	if label == "" {
+		return nil
+	}
+	state.summarizeTarget(label, ts)
+
+	tb.emitLog(ctx, state, invocationID, "bazel.target.test_summary",
+		fmt.Sprintf("Test summary: %s", label),
+		plog.SeverityNumberInfo, time.Time{},
+		map[string]string{
+			"bazel.target.label":               label,
+			"bazel.target.test.overall_status": ts.GetOverallStatus().String(),
+		},
 	)
 	return nil
 }

@@ -402,11 +402,19 @@ func TestResolveTargetSpan(t *testing.T) {
 	exactSpanID := pcommon.SpanID([8]byte{0, 0, 0, 0, 0, 0, 0, 2})
 	labelOnlySpanID := pcommon.SpanID([8]byte{0, 0, 0, 0, 0, 0, 0, 3})
 
+	// Synthesize span handles with the desired IDs. Spans live inside a
+	// ptrace.Traces; append to a scratch SpanSlice so the handles are valid.
+	scratch := ptrace.NewTraces().ResourceSpans().AppendEmpty().ScopeSpans().AppendEmpty().Spans()
+	exactSpan := scratch.AppendEmpty()
+	exactSpan.SetSpanID(exactSpanID)
+	labelOnlySpan := scratch.AppendEmpty()
+	labelOnlySpan.SetSpanID(labelOnlySpanID)
+
 	state := &invocationState{
 		rootSpanID: rootSpanID,
-		targets: map[string]pcommon.SpanID{
-			targetKey("//pkg:lib", "cfg-1"): exactSpanID,
-			targetKey("//pkg:lib", ""):      labelOnlySpanID,
+		targets: map[string]ptrace.Span{
+			targetKey("//pkg:lib", "cfg-1"): exactSpan,
+			targetKey("//pkg:lib", ""):      labelOnlySpan,
 		},
 	}
 
@@ -1613,4 +1621,232 @@ func TestWorkspaceEventArrivingAfterFinishedIsIgnored(t *testing.T) {
 	span := findRootSpan(t, sink)
 	_, has := span.Attributes().Get("bazel.workspace.late_key")
 	assert.False(t, has, "workspace events after BuildFinished must not mutate the emitted root span")
+}
+
+// --- Target lifecycle tests (issue #19) ---
+
+// findTargetSpan returns the sole bazel.target span with the given label,
+// failing the test if zero or more than one match.
+func findTargetSpan(t *testing.T, sink *consumertest.TracesSink, label string) ptrace.Span {
+	t.Helper()
+	var match ptrace.Span
+	var found int
+	for _, tr := range sink.AllTraces() {
+		for i := range tr.ResourceSpans().Len() {
+			rs := tr.ResourceSpans().At(i)
+			for j := range rs.ScopeSpans().Len() {
+				ss := rs.ScopeSpans().At(j)
+				for k := range ss.Spans().Len() {
+					s := ss.Spans().At(k)
+					if s.Name() != "bazel.target" {
+						continue
+					}
+					got, ok := s.Attributes().Get("bazel.target.label")
+					if ok && got.Str() == label {
+						match = s
+						found++
+					}
+				}
+			}
+		}
+	}
+	require.Equal(t, 1, found, "expected exactly one bazel.target span for %q", label)
+	return match
+}
+
+func TestTraceBuilder_TargetComplete_Success(t *testing.T) {
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-tc-1", "uuid-tc-1", "build", 1),
+		makeTargetConfiguredOBE(t, "inv-tc-1", "//pkg:lib", 2),
+		makeTargetCompleteOBE(t, "inv-tc-1", "//pkg:lib", 3, true, 0, "", 2),
+		makeBuildFinishedOBE(t, "inv-tc-1", 4, 0, "SUCCESS"),
+	)
+
+	span := findTargetSpan(t, sink, "//pkg:lib")
+	success, ok := span.Attributes().Get("bazel.target.success")
+	require.True(t, ok)
+	assert.True(t, success.Bool())
+
+	ogCount, ok := span.Attributes().Get("bazel.target.output_group_count")
+	require.True(t, ok)
+	assert.Equal(t, int64(2), ogCount.Int())
+
+	assert.Equal(t, ptrace.StatusCodeUnset, span.Status().Code())
+}
+
+func TestTraceBuilder_TargetComplete_Failure(t *testing.T) {
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-tc-2", "uuid-tc-2", "build", 1),
+		makeTargetConfiguredOBE(t, "inv-tc-2", "//pkg:lib", 2),
+		makeTargetCompleteOBE(t, "inv-tc-2", "//pkg:lib", 3, false, 0, "compilation failed", 0),
+		makeBuildFinishedOBE(t, "inv-tc-2", 4, 1, "FAILURE"),
+	)
+
+	span := findTargetSpan(t, sink, "//pkg:lib")
+	success, _ := span.Attributes().Get("bazel.target.success")
+	assert.False(t, success.Bool())
+
+	detail, ok := span.Attributes().Get("bazel.target.failure_detail")
+	require.True(t, ok)
+	assert.Equal(t, "compilation failed", detail.Str())
+
+	assert.Equal(t, ptrace.StatusCodeError, span.Status().Code())
+	assert.Equal(t, "compilation failed", span.Status().Message())
+}
+
+func TestTraceBuilder_TargetComplete_TestTimeout(t *testing.T) {
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-tc-3", "uuid-tc-3", "build", 1),
+		makeTargetConfiguredOBE(t, "inv-tc-3", "//pkg:test", 2),
+		makeTargetCompleteOBE(t, "inv-tc-3", "//pkg:test", 3, true, 60*time.Second, "", 0),
+		makeBuildFinishedOBE(t, "inv-tc-3", 4, 0, "SUCCESS"),
+	)
+
+	span := findTargetSpan(t, sink, "//pkg:test")
+	timeout, ok := span.Attributes().Get("bazel.target.test_timeout_s")
+	require.True(t, ok)
+	assert.Equal(t, 60.0, timeout.Double())
+}
+
+func TestTraceBuilder_TestSummary(t *testing.T) {
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-ts-1", "uuid-ts-1", "test", 1),
+		makeTargetConfiguredOBE(t, "inv-ts-1", "//pkg:test", 2),
+		makeTestSummaryOBE(t, "inv-ts-1", "//pkg:test", 3, bep.TestStatus_FAILED, 6, 3, 2, 1500*time.Millisecond),
+		makeBuildFinishedOBE(t, "inv-ts-1", 4, 1, "FAILURE"),
+	)
+
+	span := findTargetSpan(t, sink, "//pkg:test")
+
+	status, ok := span.Attributes().Get("bazel.target.test.overall_status")
+	require.True(t, ok)
+	assert.Equal(t, "FAILED", status.Str())
+
+	runCount, ok := span.Attributes().Get("bazel.target.test.total_run_count")
+	require.True(t, ok)
+	assert.Equal(t, int64(6), runCount.Int())
+
+	shards, _ := span.Attributes().Get("bazel.target.test.shard_count")
+	assert.Equal(t, int64(3), shards.Int())
+
+	cached, _ := span.Attributes().Get("bazel.target.test.total_num_cached")
+	assert.Equal(t, int64(2), cached.Int())
+
+	dur, ok := span.Attributes().Get("bazel.target.test.total_run_duration_ms")
+	require.True(t, ok)
+	assert.Equal(t, int64(1500), dur.Int())
+}
+
+func TestTraceBuilder_TargetComplete_WithoutConfigured(t *testing.T) {
+	// TargetComplete arriving without a prior TargetConfigured is a no-op.
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-tc-nc", "uuid-tc-nc", "build", 1),
+		makeTargetCompleteOBE(t, "inv-tc-nc", "//pkg:ghost", 2, false, 0, "boom", 0),
+		makeBuildFinishedOBE(t, "inv-tc-nc", 3, 1, "FAILURE"),
+	)
+
+	// No bazel.target span should exist (no TargetConfigured emitted it).
+	for _, tr := range sink.AllTraces() {
+		for i := range tr.ResourceSpans().Len() {
+			rs := tr.ResourceSpans().At(i)
+			for j := range rs.ScopeSpans().Len() {
+				ss := rs.ScopeSpans().At(j)
+				for k := range ss.Spans().Len() {
+					assert.NotEqual(t, "bazel.target", ss.Spans().At(k).Name(),
+						"no target span should exist without TargetConfigured")
+				}
+			}
+		}
+	}
+}
+
+func TestTraceBuilder_TestSummary_WithoutConfigured(t *testing.T) {
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-ts-nc", "uuid-ts-nc", "test", 1),
+		makeTestSummaryOBE(t, "inv-ts-nc", "//pkg:ghost", 2, bep.TestStatus_PASSED, 1, 1, 0, 0),
+		makeBuildFinishedOBE(t, "inv-ts-nc", 3, 0, "SUCCESS"),
+	)
+
+	// No target span, no panic, trace still emits the root span.
+	span := findRootSpan(t, sink)
+	assert.NotNil(t, span)
+}
+
+func TestTraceBuilder_NoTargetComplete_LeavesTargetAttrsMinimal(t *testing.T) {
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	// TargetConfigured without matching TargetComplete (e.g. aborted build).
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-no-tc", "uuid-no-tc", "build", 1),
+		makeTargetConfiguredOBE(t, "inv-no-tc", "//pkg:abort", 2),
+		makeBuildFinishedOBE(t, "inv-no-tc", 3, 1, "FAILURE"),
+	)
+
+	span := findTargetSpan(t, sink, "//pkg:abort")
+	_, hasSuccess := span.Attributes().Get("bazel.target.success")
+	assert.False(t, hasSuccess, "target without TargetComplete should not have success attr")
+	assert.Equal(t, ptrace.StatusCodeUnset, span.Status().Code())
+}
+
+func TestTraceBuilder_NoTestSummary_LeavesTestAttrsAbsent(t *testing.T) {
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	// Non-test target path: TargetConfigured + TargetComplete, no TestSummary.
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-no-ts", "uuid-no-ts", "build", 1),
+		makeTargetConfiguredOBE(t, "inv-no-ts", "//pkg:lib", 2),
+		makeTargetCompleteOBE(t, "inv-no-ts", "//pkg:lib", 3, true, 0, "", 1),
+		makeBuildFinishedOBE(t, "inv-no-ts", 4, 0, "SUCCESS"),
+	)
+
+	span := findTargetSpan(t, sink, "//pkg:lib")
+	span.Attributes().Range(func(k string, _ pcommon.Value) bool {
+		assert.False(t, strings.HasPrefix(k, "bazel.target.test."),
+			"non-test target should not have bazel.target.test.* attrs; got %s", k)
+		return true
+	})
 }

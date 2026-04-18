@@ -57,11 +57,29 @@ consequence.
 
 One span per configured target, emitted from `TargetConfigured`. Structural
 parent for `bazel.action` and `bazel.test` spans belonging to the target.
+`TargetComplete` and `TestSummary` arrive after `TargetConfigured` and
+enrich the existing span with outcome and aggregate-test attributes.
 
-| Attribute                | Type   | Source                                |
-|--------------------------|--------|---------------------------------------|
-| `bazel.target.label`     | string | Target label from `TargetConfiguredId`|
-| `bazel.target.rule_kind` | string | `TargetConfigured.target_kind`        |
+| Attribute                              | Type    | Source                                             |
+|----------------------------------------|---------|----------------------------------------------------|
+| `bazel.target.label`                   | string  | Target label from `TargetConfiguredId`             |
+| `bazel.target.rule_kind`               | string  | `TargetConfigured.target_kind`                     |
+| `bazel.target.success`                 | bool    | `TargetComplete.success`                           |
+| `bazel.target.test_timeout_s`          | float64 | `TargetComplete.test_timeout` (seconds)            |
+| `bazel.target.failure_detail`          | string  | `TargetComplete.failure_detail.message`            |
+| `bazel.target.output_group_count`      | int     | `len(TargetComplete.output_group)`                 |
+| `bazel.target.test.overall_status`     | string  | `TestSummary.overall_status` (enum)                |
+| `bazel.target.test.total_run_count`    | int     | `TestSummary.total_run_count`                      |
+| `bazel.target.test.shard_count`        | int     | `TestSummary.shard_count`                          |
+| `bazel.target.test.total_num_cached`   | int     | `TestSummary.total_num_cached`                     |
+| `bazel.target.test.total_run_duration_ms` | int  | `TestSummary.total_run_duration` (ms)              |
+
+Status is set to `ERROR` when `TargetComplete.success` is false — message
+is the `failure_detail.message` when present, otherwise `"target failed"`.
+`TargetComplete` and `TestSummary` are no-ops if no target span exists for
+the label (aborted or out-of-order), matching the silent-degradation
+pattern used elsewhere. Non-test targets receive no `bazel.target.test.*`
+attributes.
 
 ## `bazel.action`
 
