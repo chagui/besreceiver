@@ -3,6 +3,7 @@ package besreceiver
 import (
 	"context"
 	"io"
+	"sort"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -108,6 +109,44 @@ func makeBuildFinishedOBE(t testing.TB, invID string, seqNum int64, code int32, 
 				ExitCode:   &bep.BuildFinished_ExitCode{Name: name, Code: code},
 				FinishTime: &timestamppb.Timestamp{Seconds: 1700000010},
 			},
+		},
+	})
+}
+
+func makeWorkspaceStatusOBE(t testing.TB, invID string, seqNum int64, items map[string]string) *pb.OrderedBuildEvent {
+	t.Helper()
+	wsItems := make([]*bep.WorkspaceStatus_Item, 0, len(items))
+	// Sort by key for deterministic wire-level order (BEP carries a repeated field).
+	keys := make([]string, 0, len(items))
+	for k := range items {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		wsItems = append(wsItems, &bep.WorkspaceStatus_Item{Key: k, Value: items[k]})
+	}
+	return makeOrderedBuildEvent(t, invID, seqNum, &bep.BuildEvent{
+		Id: &bep.BuildEventId{
+			Id: &bep.BuildEventId_WorkspaceStatus{
+				WorkspaceStatus: &bep.BuildEventId_WorkspaceStatusId{},
+			},
+		},
+		Payload: &bep.BuildEvent_WorkspaceStatus{
+			WorkspaceStatus: &bep.WorkspaceStatus{Item: wsItems},
+		},
+	})
+}
+
+func makeBuildMetadataOBE(t testing.TB, invID string, seqNum int64, entries map[string]string) *pb.OrderedBuildEvent {
+	t.Helper()
+	return makeOrderedBuildEvent(t, invID, seqNum, &bep.BuildEvent{
+		Id: &bep.BuildEventId{
+			Id: &bep.BuildEventId_BuildMetadata{
+				BuildMetadata: &bep.BuildEventId_BuildMetadataId{},
+			},
+		},
+		Payload: &bep.BuildEvent_BuildMetadata{
+			BuildMetadata: &bep.BuildMetadata{Metadata: entries},
 		},
 	})
 }

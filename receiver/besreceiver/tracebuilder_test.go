@@ -1438,3 +1438,179 @@ func TestAbortReasonString_AllEnumValues(t *testing.T) {
 		})
 	}
 }
+
+// --- WorkspaceStatus + BuildMetadata tests (issue #22) ---
+
+func TestWorkspaceStatusAttributesOnRootSpan(t *testing.T) {
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-ws-1", "uuid-ws-1", "build", 1),
+		makeWorkspaceStatusOBE(t, "inv-ws-1", 2, map[string]string{
+			"BUILD_SCM_REVISION": "abc123",
+			"STABLE_GIT_BRANCH":  "main",
+		}),
+		makeBuildFinishedOBE(t, "inv-ws-1", 3, 0, "SUCCESS"),
+	)
+
+	span := findRootSpan(t, sink)
+
+	rev, ok := span.Attributes().Get("bazel.workspace.build_scm_revision")
+	require.True(t, ok, "missing bazel.workspace.build_scm_revision")
+	assert.Equal(t, "abc123", rev.Str())
+
+	branch, ok := span.Attributes().Get("bazel.workspace.stable_git_branch")
+	require.True(t, ok, "missing bazel.workspace.stable_git_branch")
+	assert.Equal(t, "main", branch.Str())
+}
+
+func TestBuildMetadataAttributesOnRootSpan(t *testing.T) {
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-md-1", "uuid-md-1", "build", 1),
+		makeBuildMetadataOBE(t, "inv-md-1", 2, map[string]string{
+			"ci_pipeline_id": "pipeline-42",
+			"PR Number":      "123",
+		}),
+		makeBuildFinishedOBE(t, "inv-md-1", 3, 0, "SUCCESS"),
+	)
+
+	span := findRootSpan(t, sink)
+
+	pipeline, ok := span.Attributes().Get("bazel.metadata.ci_pipeline_id")
+	require.True(t, ok)
+	assert.Equal(t, "pipeline-42", pipeline.Str())
+
+	pr, ok := span.Attributes().Get("bazel.metadata.pr_number")
+	require.True(t, ok, "expected sanitized 'PR Number' → pr_number")
+	assert.Equal(t, "123", pr.Str())
+}
+
+func TestWorkspaceItemsCappedAt30(t *testing.T) {
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	items := make(map[string]string, 50)
+	for i := range 50 {
+		items[fmt.Sprintf("KEY_%03d", i)] = fmt.Sprintf("val-%d", i)
+	}
+
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-ws-cap", "uuid-ws-cap", "build", 1),
+		makeWorkspaceStatusOBE(t, "inv-ws-cap", 2, items),
+		makeBuildFinishedOBE(t, "inv-ws-cap", 3, 0, "SUCCESS"),
+	)
+
+	span := findRootSpan(t, sink)
+	count := 0
+	span.Attributes().Range(func(k string, _ pcommon.Value) bool {
+		if strings.HasPrefix(k, "bazel.workspace.") {
+			count++
+		}
+		return true
+	})
+	assert.Equal(t, maxWorkspaceItems, count)
+}
+
+func TestBuildMetadataCappedAt20(t *testing.T) {
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	entries := make(map[string]string, 40)
+	for i := range 40 {
+		entries[fmt.Sprintf("key_%03d", i)] = fmt.Sprintf("val-%d", i)
+	}
+
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-md-cap", "uuid-md-cap", "build", 1),
+		makeBuildMetadataOBE(t, "inv-md-cap", 2, entries),
+		makeBuildFinishedOBE(t, "inv-md-cap", 3, 0, "SUCCESS"),
+	)
+
+	span := findRootSpan(t, sink)
+	count := 0
+	span.Attributes().Range(func(k string, _ pcommon.Value) bool {
+		if strings.HasPrefix(k, "bazel.metadata.") {
+			count++
+		}
+		return true
+	})
+	assert.Equal(t, maxBuildMetadataEntries, count)
+}
+
+func TestAttributeValueTruncatedAt256Chars(t *testing.T) {
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	bigVal := strings.Repeat("x", 500)
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-trunc", "uuid-trunc", "build", 1),
+		makeWorkspaceStatusOBE(t, "inv-trunc", 2, map[string]string{"BIG": bigVal}),
+		makeBuildFinishedOBE(t, "inv-trunc", 3, 0, "SUCCESS"),
+	)
+
+	span := findRootSpan(t, sink)
+	got, ok := span.Attributes().Get("bazel.workspace.big")
+	require.True(t, ok)
+	assert.Len(t, got.Str(), maxAttrValueLen)
+}
+
+func TestMissingWorkspaceAndMetadataEventsDoNotBreakTraces(t *testing.T) {
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-nows", "uuid-nows", "build", 1),
+		makeBuildFinishedOBE(t, "inv-nows", 2, 0, "SUCCESS"),
+	)
+
+	span := findRootSpan(t, sink)
+
+	// No bazel.workspace.* or bazel.metadata.* should be present.
+	span.Attributes().Range(func(k string, _ pcommon.Value) bool {
+		if strings.HasPrefix(k, "bazel.workspace.") || strings.HasPrefix(k, "bazel.metadata.") {
+			t.Errorf("unexpected context attribute on root span: %s", k)
+		}
+		return true
+	})
+}
+
+func TestWorkspaceEventArrivingAfterFinishedIsIgnored(t *testing.T) {
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-post", "uuid-post", "build", 1),
+		makeBuildFinishedOBE(t, "inv-post", 2, 0, "SUCCESS"),
+		// WorkspaceStatus after finalize — should be ignored.
+		makeWorkspaceStatusOBE(t, "inv-post", 3, map[string]string{"LATE_KEY": "late_val"}),
+	)
+
+	span := findRootSpan(t, sink)
+	_, has := span.Attributes().Get("bazel.workspace.late_key")
+	assert.False(t, has, "workspace events after BuildFinished must not mutate the emitted root span")
+}
