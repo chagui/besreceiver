@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"go.opentelemetry.io/collector/consumer"
 	"go.opentelemetry.io/collector/consumer/consumererror"
@@ -24,6 +25,7 @@ import (
 	pb "google.golang.org/genproto/googleapis/devtools/build/v1"
 
 	bep "github.com/chagui/besreceiver/internal/bep/buildeventstream"
+	"github.com/chagui/besreceiver/internal/bep/commandline"
 )
 
 const (
@@ -185,7 +187,7 @@ func (tb *TraceBuilder) ProcessOrderedBuildEvent(ctx context.Context, obe *pb.Or
 	}
 }
 
-//nolint:gocyclo,gocognit,cyclop // Flat payload dispatch: grows as the receiver handles more BEP event types. Splitting by payload family would hurt discoverability.
+//nolint:gocyclo,gocognit,cyclop,funlen // Flat payload dispatch: grows as the receiver handles more BEP event types. Splitting by payload family would hurt discoverability.
 func (tb *TraceBuilder) processEvent(ctx context.Context, invocations map[string]*invocationState, invocationID string, event *bep.BuildEvent) error {
 	tb.eventsProcessed.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("event_type", eventTypeName(event)),
@@ -204,7 +206,22 @@ func (tb *TraceBuilder) processEvent(ctx context.Context, invocations map[string
 		if p.Configured == nil {
 			return nil
 		}
-		return tb.handleTargetConfigured(ctx, invocations, invocationID, event.GetId(), p.Configured)
+		return tb.handleTargetConfigured(ctx, invocations, invocationID, event, p.Configured)
+	case *bep.BuildEvent_Configuration:
+		if p.Configuration == nil {
+			return nil
+		}
+		return tb.handleConfiguration(ctx, invocations, invocationID, event.GetId(), p.Configuration)
+	case *bep.BuildEvent_OptionsParsed:
+		if p.OptionsParsed == nil {
+			return nil
+		}
+		return tb.handleOptionsParsed(ctx, invocations, invocationID, p.OptionsParsed)
+	case *bep.BuildEvent_StructuredCommandLine:
+		if p.StructuredCommandLine == nil {
+			return nil
+		}
+		return tb.handleStructuredCommandLine(ctx, invocations, invocationID, p.StructuredCommandLine)
 	case *bep.BuildEvent_Action:
 		if p.Action == nil {
 			return nil
@@ -279,6 +296,12 @@ func eventTypeName(event *bep.BuildEvent) string {
 		return "target_complete"
 	case *bep.BuildEvent_TestSummary:
 		return "test_summary"
+	case *bep.BuildEvent_Configuration:
+		return "configuration"
+	case *bep.BuildEvent_OptionsParsed:
+		return "options_parsed"
+	case *bep.BuildEvent_StructuredCommandLine:
+		return "structured_command_line"
 	default:
 		return "other"
 	}
@@ -314,18 +337,30 @@ func (tb *TraceBuilder) handleBuildStarted(ctx context.Context, invocations map[
 	return nil
 }
 
-func (tb *TraceBuilder) handleTargetConfigured(ctx context.Context, invocations map[string]*invocationState, invocationID string, eventID *bep.BuildEventId, configured *bep.TargetConfigured) error {
+func (tb *TraceBuilder) handleTargetConfigured(ctx context.Context, invocations map[string]*invocationState, invocationID string, event *bep.BuildEvent, configured *bep.TargetConfigured) error {
 	state := invocations[invocationID]
 	if state == nil {
 		return nil
 	}
 
-	tc := eventID.GetTargetConfigured()
+	tc := event.GetId().GetTargetConfigured()
 	if tc == nil {
 		return nil
 	}
 
-	state.addTarget(tc.GetLabel(), configured.GetTargetKind())
+	// Config id for this target lives on the TargetCompleted child event id,
+	// not on the TargetConfigured payload itself. Pick the first non-empty
+	// id that isn't "none" (the null config per BEP spec).
+	configID := ""
+	for _, child := range event.GetChildren() {
+		id := child.GetTargetCompleted().GetConfiguration().GetId()
+		if id != "" && id != nullConfigID {
+			configID = id
+			break
+		}
+	}
+
+	state.addTarget(tc.GetLabel(), configured.GetTargetKind(), configID)
 
 	tb.logger.Debug("Target configured",
 		zap.String("invocation_id", invocationID),
@@ -529,6 +564,84 @@ func (tb *TraceBuilder) handleBuildMetadata(_ context.Context, invocations map[s
 		zap.Int("entries", len(bm.GetMetadata())),
 	)
 	return nil
+}
+
+// handleConfiguration buffers a Configuration payload keyed by its id for
+// later lookup when the owning TargetConfigured event arrives.
+func (tb *TraceBuilder) handleConfiguration(_ context.Context, invocations map[string]*invocationState, invocationID string, eventID *bep.BuildEventId, cfg *bep.Configuration) error {
+	state := invocations[invocationID]
+	if state == nil {
+		return nil
+	}
+	configID := eventID.GetConfiguration().GetId()
+	state.storeConfiguration(configID, cfg)
+	tb.logger.Debug("Configuration received",
+		zap.String("invocation_id", invocationID),
+		zap.String("config_id", configID),
+		zap.String("mnemonic", cfg.GetMnemonic()),
+	)
+	return nil
+}
+
+// handleOptionsParsed buffers --tool_tag and explicit option counts onto the
+// invocation state for emission on the root span at finalize.
+func (tb *TraceBuilder) handleOptionsParsed(_ context.Context, invocations map[string]*invocationState, invocationID string, op *bep.OptionsParsed) error {
+	state := invocations[invocationID]
+	if state == nil {
+		return nil
+	}
+	state.setOptionsParsed(op)
+	return nil
+}
+
+// handleStructuredCommandLine reconstructs a human-readable command-line
+// string from the "original" StructuredCommandLine payload and buffers it
+// on the invocation state. Canonical and tool variants are ignored.
+func (tb *TraceBuilder) handleStructuredCommandLine(_ context.Context, invocations map[string]*invocationState, invocationID string, cl *commandline.CommandLine) error {
+	state := invocations[invocationID]
+	if state == nil {
+		return nil
+	}
+	if cl.GetCommandLineLabel() != "original" {
+		return nil
+	}
+	if state.flushed {
+		return nil
+	}
+	state.commandLine = reconstructCommandLine(cl)
+	return nil
+}
+
+const commandLineMaxBytes = 1024
+
+// reconstructCommandLine joins a CommandLine's sections into a single string
+// (ChunkList chunks verbatim, Option lists via combined_form), truncating to
+// commandLineMaxBytes and appending an ellipsis when truncated.
+func reconstructCommandLine(cl *commandline.CommandLine) string {
+	var parts []string
+	for _, section := range cl.GetSections() {
+		if cl := section.GetChunkList(); cl != nil {
+			parts = append(parts, cl.GetChunk()...)
+			continue
+		}
+		if ol := section.GetOptionList(); ol != nil {
+			for _, opt := range ol.GetOption() {
+				if cf := opt.GetCombinedForm(); cf != "" {
+					parts = append(parts, cf)
+				}
+			}
+		}
+	}
+	joined := strings.Join(parts, " ")
+	if len(joined) <= commandLineMaxBytes {
+		return joined
+	}
+	// Back off to rune boundary so we never emit invalid UTF-8.
+	end := commandLineMaxBytes
+	for end > 0 && !utf8.RuneStart(joined[end]) {
+		end--
+	}
+	return joined[:end] + "…"
 }
 
 // handleTargetComplete enriches an existing bazel.target span with outcome

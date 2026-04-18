@@ -31,16 +31,20 @@ without `BuildFinished`, from the reaper path.
 
 | Attribute                  | Type   | Source                                                         |
 |----------------------------|--------|----------------------------------------------------------------|
-| `bazel.command`            | string | `BuildStarted.command`                                         |
-| `bazel.uuid`               | string | `BuildStarted.uuid`                                            |
-| `bazel.build_tool_version` | string | `BuildStarted.build_tool_version`                              |
-| `bazel.workspace_directory`| string | `BuildStarted.workspace_directory`                             |
-| `bazel.exit_code.name`     | string | `BuildFinished.exit_code.name` (absent on abort-only finalize) |
-| `bazel.exit_code.code`     | int    | `BuildFinished.exit_code.code`                                 |
-| `bazel.abort.reason`       | string | `Aborted.reason` — lowercased enum; first abort wins           |
-| `bazel.abort.description`  | string | `Aborted.description`                                          |
-| `bazel.workspace.<key>`    | string | `WorkspaceStatus.item[*]` — keys sanitized, capped at 30       |
-| `bazel.metadata.<key>`     | string | `BuildMetadata.metadata` — keys sanitized, capped at 20        |
+| `bazel.command`              | string | `BuildStarted.command`                                           |
+| `bazel.uuid`                 | string | `BuildStarted.uuid`                                              |
+| `bazel.build_tool_version`   | string | `BuildStarted.build_tool_version`                                |
+| `bazel.workspace_directory`  | string | `BuildStarted.workspace_directory`                               |
+| `bazel.exit_code.name`       | string | `BuildFinished.exit_code.name` (absent on abort-only finalize)   |
+| `bazel.exit_code.code`       | int    | `BuildFinished.exit_code.code`                                   |
+| `bazel.abort.reason`         | string | `Aborted.reason` — lowercased enum; first abort wins             |
+| `bazel.abort.description`    | string | `Aborted.description`                                            |
+| `bazel.workspace.<key>`      | string | `WorkspaceStatus.item[*]` — keys sanitized, capped at 30         |
+| `bazel.metadata.<key>`       | string | `BuildMetadata.metadata` — keys sanitized, capped at 20          |
+| `bazel.tool_tag`             | string | `OptionsParsed.tool_tag` (e.g. CI system identifier)             |
+| `bazel.options.startup_count`| int    | `len(OptionsParsed.explicit_startup_options)`                    |
+| `bazel.options.command_count`| int    | `len(OptionsParsed.explicit_cmd_line)`                           |
+| `bazel.command_line`         | string | Reconstructed `StructuredCommandLine` ("original" label, 1024 B) |
 
 Key sanitization for `bazel.workspace.*` and `bazel.metadata.*`: lowercase,
 collapse whitespace to `_`, strip characters outside `[a-z0-9_.]`, trim
@@ -62,17 +66,27 @@ enrich the existing span with outcome and aggregate-test attributes.
 
 | Attribute                              | Type    | Source                                             |
 |----------------------------------------|---------|----------------------------------------------------|
-| `bazel.target.label`                   | string  | Target label from `TargetConfiguredId`             |
-| `bazel.target.rule_kind`               | string  | `TargetConfigured.target_kind`                     |
-| `bazel.target.success`                 | bool    | `TargetComplete.success`                           |
-| `bazel.target.test_timeout_s`          | float64 | `TargetComplete.test_timeout` (seconds)            |
-| `bazel.target.failure_detail`          | string  | `TargetComplete.failure_detail.message`            |
-| `bazel.target.output_group_count`      | int     | `len(TargetComplete.output_group)`                 |
-| `bazel.target.test.overall_status`     | string  | `TestSummary.overall_status` (enum)                |
-| `bazel.target.test.total_run_count`    | int     | `TestSummary.total_run_count`                      |
-| `bazel.target.test.shard_count`        | int     | `TestSummary.shard_count`                          |
-| `bazel.target.test.total_num_cached`   | int     | `TestSummary.total_num_cached`                     |
-| `bazel.target.test.total_run_duration_ms` | int  | `TestSummary.total_run_duration` (ms)              |
+| `bazel.target.label`                      | string  | Target label from `TargetConfiguredId`             |
+| `bazel.target.rule_kind`                  | string  | `TargetConfigured.target_kind`                     |
+| `bazel.target.config.mnemonic`            | string  | `Configuration.mnemonic` (e.g. `k8-opt`)           |
+| `bazel.target.config.platform`            | string  | `Configuration.platform_name`                      |
+| `bazel.target.config.cpu`                 | string  | `Configuration.cpu`                                |
+| `bazel.target.config.is_tool`             | bool    | `Configuration.is_tool` (host/exec vs target)      |
+| `bazel.target.success`                    | bool    | `TargetComplete.success`                           |
+| `bazel.target.test_timeout_s`             | float64 | `TargetComplete.test_timeout` (seconds)            |
+| `bazel.target.failure_detail`             | string  | `TargetComplete.failure_detail.message`            |
+| `bazel.target.output_group_count`         | int     | `len(TargetComplete.output_group)`                 |
+| `bazel.target.test.overall_status`        | string  | `TestSummary.overall_status` (enum)                |
+| `bazel.target.test.total_run_count`       | int     | `TestSummary.total_run_count`                      |
+| `bazel.target.test.shard_count`           | int     | `TestSummary.shard_count`                          |
+| `bazel.target.test.total_num_cached`      | int     | `TestSummary.total_num_cached`                     |
+| `bazel.target.test.total_run_duration_ms` | int     | `TestSummary.total_run_duration` (ms)              |
+
+`bazel.target.config.*` attributes require the `Configuration` event for
+this target's config id to have arrived before `TargetConfigured`. Bazel
+emits it in that order in practice; when the Configuration is missing or
+has the sentinel id `"none"`, config attributes are skipped. The receiver
+does not back-patch attributes retroactively.
 
 Status is set to `ERROR` when `TargetComplete.success` is false — message
 is the `failure_detail.message` when present, otherwise `"target failed"`.
@@ -160,6 +174,16 @@ aggregate `bazel.metrics.wall_time_ms` with a p50.
 `bazel.uuid` on the root span matches the `--invocation_id` shown in
 Bazel's terminal output, making it easy to pivot from a CI log line
 ("Invocation ID: abc-123") to the full trace.
+
+**Compare build times across configurations.**
+Group target spans by `bazel.target.config.mnemonic` (e.g. `k8-opt` vs
+`k8-fastbuild`) and aggregate their duration. Separate host-tool builds
+from user-target builds using `bazel.target.config.is_tool = false`.
+
+**Identify builds launched by a specific tool.**
+Filter root spans where `bazel.tool_tag = "gazelle-ci"` (or whatever
+value CI passes via `--tool_tag=...`) to see every invocation from that
+tool without pulling metadata from external systems.
 
 ## Logs
 
