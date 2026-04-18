@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -571,12 +572,12 @@ func TestReapStale(t *testing.T) {
 	// Build invocation state directly with pending spans.
 	state := newInvocationState(
 		traceIDFromUUID("uuid-stale"),
-		newSpanID(),
+		spanIDFromIdentity("uuid-stale", "root"),
 		&bep.BuildStarted{Uuid: "uuid-stale", Command: "build"},
 		time.Now().Add(-time.Hour),
 	)
 	span := state.appendSpan()
-	span.SetSpanID(newSpanID())
+	span.SetSpanID(spanIDFromIdentity("uuid-stale", "action", "//pkg:lib", "Javac", ""))
 	span.SetName("bazel.action")
 
 	invocations := map[string]*invocationState{
@@ -607,6 +608,132 @@ func TestTraceIDFromUUID_NoCollisions(t *testing.T) {
 		}
 		seen[tid] = uuid
 	}
+}
+
+func TestSpanIDFromIdentity_Deterministic(t *testing.T) {
+	cases := []struct {
+		name     string
+		partsA   []string
+		partsB   []string
+		wantSame bool
+	}{
+		{"same parts produce same ID", []string{"u", "root"}, []string{"u", "root"}, true},
+		{"different role differs", []string{"u", "root"}, []string{"u", "target"}, false},
+		{"different uuid differs", []string{"u1", "root"}, []string{"u2", "root"}, false},
+		{"different label differs",
+			[]string{"u", "target", "//a:b"},
+			[]string{"u", "target", "//a:c"},
+			false,
+		},
+		{"action identity differs by primary output",
+			[]string{"u", "action", "//a:b", "Javac", "bazel-out/x"},
+			[]string{"u", "action", "//a:b", "Javac", "bazel-out/y"},
+			false,
+		},
+		{"test identity differs by attempt",
+			[]string{"u", "test", "//a:b", "1", "0", "1"},
+			[]string{"u", "test", "//a:b", "1", "0", "2"},
+			false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a := spanIDFromIdentity(tc.partsA...)
+			b := spanIDFromIdentity(tc.partsB...)
+			if tc.wantSame && a != b {
+				t.Errorf("expected identical span IDs, got %x and %x", a, b)
+			}
+			if !tc.wantSame && a == b {
+				t.Errorf("expected different span IDs, both were %x", a)
+			}
+		})
+	}
+}
+
+func TestSpanIDFromIdentity_NoCollisions(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping collision test in short mode")
+	}
+
+	seen := make(map[pcommon.SpanID]string, 10000)
+	for i := range 10000 {
+		identity := fmt.Sprintf("uuid-%d\x00role\x00label", i)
+		sid := spanIDFromIdentity(identity)
+		if prev, ok := seen[sid]; ok {
+			t.Fatalf("collision: %q and %q both map to %x", prev, identity, sid)
+		}
+		seen[sid] = identity
+	}
+}
+
+// TestSpanIDs_ReplayDeterministic replays an identical event stream through two
+// independent TraceBuilders and asserts that every emitted span has the same
+// name, SpanID, and ParentSpanID in both runs.
+func TestSpanIDs_ReplayDeterministic(t *testing.T) {
+	collect := func() []spanTuple {
+		sink := new(consumertest.TracesSink)
+		tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
+		tb.Start()
+		defer tb.Stop()
+		ctx := context.Background()
+		processEvents(ctx, t, tb,
+			makeBuildStartedOBE(t, "inv-1", "uuid-xyz", "build", 1),
+			makeTargetConfiguredOBE(t, "inv-1", "//pkg:lib", 2),
+			makeActionOBE(t, "inv-1", "//pkg:lib", "Javac", 3, true),
+			makeTestResultOBE(t, "inv-1", "//pkg:lib", 4, bep.TestStatus_PASSED),
+			makeBuildFinishedOBE(t, "inv-1", 5, 0, "SUCCESS"),
+			makeBuildMetricsOBE(t, "inv-1", 6, 100, 50),
+		)
+		return collectSpanTuples(sink)
+	}
+
+	run1 := collect()
+	run2 := collect()
+
+	if len(run1) == 0 {
+		t.Fatal("expected at least one span")
+	}
+	if len(run1) != len(run2) {
+		t.Fatalf("span count mismatch: %d vs %d", len(run1), len(run2))
+	}
+	for i := range run1 {
+		if run1[i] != run2[i] {
+			t.Errorf("span %d mismatch:\n  run1: %+v\n  run2: %+v", i, run1[i], run2[i])
+		}
+	}
+}
+
+type spanTuple struct {
+	name     string
+	spanID   pcommon.SpanID
+	parentID pcommon.SpanID
+}
+
+func collectSpanTuples(sink *consumertest.TracesSink) []spanTuple {
+	var out []spanTuple
+	for _, traces := range sink.AllTraces() {
+		for i := range traces.ResourceSpans().Len() {
+			rs := traces.ResourceSpans().At(i)
+			for j := range rs.ScopeSpans().Len() {
+				ss := rs.ScopeSpans().At(j)
+				for k := range ss.Spans().Len() {
+					s := ss.Spans().At(k)
+					out = append(out, spanTuple{
+						name:     s.Name(),
+						spanID:   s.SpanID(),
+						parentID: s.ParentSpanID(),
+					})
+				}
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].name != out[j].name {
+			return out[i].name < out[j].name
+		}
+		return fmt.Sprintf("%x", out[i].spanID) < fmt.Sprintf("%x", out[j].spanID)
+	})
+	return out
 }
 
 func TestTargetKey_Uniqueness(t *testing.T) {

@@ -101,7 +101,7 @@ func BenchmarkResolveTargetSpan(b *testing.B) {
 	}
 	for i := range 100 {
 		label := fmt.Sprintf("//pkg:target-%d", i)
-		state.targets[targetKey(label, fmt.Sprintf("cfg-%d", i))] = newSpanID()
+		state.targets[targetKey(label, fmt.Sprintf("cfg-%d", i))] = spanIDFromIdentity("bench", "target", label)
 	}
 
 	b.Run("exact_match", func(b *testing.B) {
