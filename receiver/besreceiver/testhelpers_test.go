@@ -112,6 +112,29 @@ func makeBuildFinishedOBE(t testing.TB, invID string, seqNum int64, code int32, 
 	})
 }
 
+// makeAbortedOBE builds an OrderedBuildEvent for an Aborted payload. Aborted
+// events can ride on any BuildEventId; this helper uses BuildFinished by
+// default to exercise the "aborts replace another event ID" path. Pass a
+// non-nil overrideID to use a different event id shape.
+func makeAbortedOBE(t testing.TB, invID string, seqNum int64, reason bep.Aborted_AbortReason, description string, overrideID *bep.BuildEventId) *pb.OrderedBuildEvent {
+	t.Helper()
+	id := overrideID
+	if id == nil {
+		id = &bep.BuildEventId{
+			Id: &bep.BuildEventId_BuildFinished{BuildFinished: &bep.BuildEventId_BuildFinishedId{}},
+		}
+	}
+	return makeOrderedBuildEvent(t, invID, seqNum, &bep.BuildEvent{
+		Id: id,
+		Payload: &bep.BuildEvent_Aborted{
+			Aborted: &bep.Aborted{
+				Reason:      reason,
+				Description: description,
+			},
+		},
+	})
+}
+
 func makeActionOBE(t testing.TB, invID, label, mnemonic string, seqNum int64, success bool) *pb.OrderedBuildEvent {
 	t.Helper()
 	exitCode := int32(0)

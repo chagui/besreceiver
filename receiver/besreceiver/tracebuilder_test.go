@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -1250,4 +1251,190 @@ func TestTestResultBeforeTarget(t *testing.T) {
 
 	assert.Equal(t, targetSpan.SpanID, testSpan.ParentSpanID,
 		"test should be child of target even when test result arrives first")
+}
+
+// --- Aborted event tests (issue #20) ---
+
+// findRootSpan returns the single bazel.build span from a sink, failing the
+// test if zero or more than one match.
+func findRootSpan(t *testing.T, sink *consumertest.TracesSink) ptrace.Span {
+	t.Helper()
+	var match ptrace.Span
+	var found int
+	for _, tr := range sink.AllTraces() {
+		for i := range tr.ResourceSpans().Len() {
+			rs := tr.ResourceSpans().At(i)
+			for j := range rs.ScopeSpans().Len() {
+				ss := rs.ScopeSpans().At(j)
+				for k := range ss.Spans().Len() {
+					s := ss.Spans().At(k)
+					if s.Name() == "bazel.build" || strings.HasPrefix(s.Name(), "bazel.build ") {
+						match = s
+						found++
+					}
+				}
+			}
+		}
+	}
+	require.Equal(t, 1, found, "expected exactly one bazel.build span")
+	return match
+}
+
+func TestTraceBuilder_Aborted_StampsRootSpan(t *testing.T) {
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-abort-1", "uuid-abort-1", "build", 1),
+		makeAbortedOBE(t, "inv-abort-1", 2, bep.Aborted_USER_INTERRUPTED, "ctrl-c", nil),
+		makeBuildFinishedOBE(t, "inv-abort-1", 3, 8, "INTERRUPTED"),
+	)
+
+	span := findRootSpan(t, sink)
+
+	reason, ok := span.Attributes().Get("bazel.abort.reason")
+	require.True(t, ok, "missing bazel.abort.reason")
+	assert.Equal(t, "user_interrupted", reason.Str())
+
+	description, ok := span.Attributes().Get("bazel.abort.description")
+	require.True(t, ok, "missing bazel.abort.description")
+	assert.Equal(t, "ctrl-c", description.Str())
+
+	exitName, ok := span.Attributes().Get("bazel.exit_code.name")
+	require.True(t, ok, "missing bazel.exit_code.name")
+	assert.Equal(t, "INTERRUPTED", exitName.Str(), "exit code attrs preserved alongside abort")
+
+	assert.Equal(t, ptrace.StatusCodeError, span.Status().Code())
+	assert.Equal(t, "aborted: user_interrupted: ctrl-c", span.Status().Message())
+}
+
+func TestTraceBuilder_Aborted_OnlyFirstRecorded(t *testing.T) {
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-abort-2", "uuid-abort-2", "build", 1),
+		makeAbortedOBE(t, "inv-abort-2", 2, bep.Aborted_OUT_OF_MEMORY, "heap", nil),
+		makeAbortedOBE(t, "inv-abort-2", 3, bep.Aborted_INTERNAL, "crash", nil),
+		makeBuildFinishedOBE(t, "inv-abort-2", 4, 37, "OOM_ERROR"),
+	)
+
+	span := findRootSpan(t, sink)
+
+	reason, _ := span.Attributes().Get("bazel.abort.reason")
+	assert.Equal(t, "out_of_memory", reason.Str(), "first abort reason preserved")
+
+	description, _ := span.Attributes().Get("bazel.abort.description")
+	assert.Equal(t, "heap", description.Str(), "first abort description preserved")
+}
+
+func TestTraceBuilder_Aborted_WithoutBuildFinished(t *testing.T) {
+	// Exercise the reaper path directly: an invocation that recorded an
+	// abort but never saw BuildFinished must still emit the root span when
+	// flushOrphaned is invoked.
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{
+		InvocationTimeout: time.Nanosecond,
+	})
+
+	state := newInvocationState(
+		traceIDFromUUID("uuid-abort-3"),
+		spanIDFromIdentity("uuid-abort-3", "root"),
+		&bep.BuildStarted{Uuid: "uuid-abort-3", Command: "build"},
+		time.Now().Add(-time.Hour),
+	)
+	state.recordAbort(&bep.Aborted{Reason: bep.Aborted_TIME_OUT, Description: "deadline"})
+
+	invocations := map[string]*invocationState{"inv-abort-3": state}
+	tb.reapStale(invocations, time.Now())
+
+	assert.Empty(t, invocations, "expected invocation to be reaped")
+
+	span := findRootSpan(t, sink)
+	reason, ok := span.Attributes().Get("bazel.abort.reason")
+	require.True(t, ok, "missing bazel.abort.reason on reaped aborted invocation")
+	assert.Equal(t, "time_out", reason.Str())
+
+	_, hasExit := span.Attributes().Get("bazel.exit_code.name")
+	assert.False(t, hasExit, "exit code should not be present without BuildFinished")
+
+	assert.Equal(t, ptrace.StatusCodeError, span.Status().Code())
+}
+
+func TestTraceBuilder_BuildFinished_NonAborted_NoAbortAttrs(t *testing.T) {
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-no-abort", "uuid-no-abort", "build", 1),
+		makeBuildFinishedOBE(t, "inv-no-abort", 2, 0, "SUCCESS"),
+	)
+
+	span := findRootSpan(t, sink)
+
+	_, hasReason := span.Attributes().Get("bazel.abort.reason")
+	assert.False(t, hasReason, "non-aborted build should not have abort reason")
+	_, hasDesc := span.Attributes().Get("bazel.abort.description")
+	assert.False(t, hasDesc, "non-aborted build should not have abort description")
+	assert.Equal(t, ptrace.StatusCodeUnset, span.Status().Code())
+}
+
+func TestTraceBuilder_Aborted_OnArbitraryEventID(t *testing.T) {
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	// Abort rides on a TargetConfigured event ID instead of BuildFinished.
+	targetID := &bep.BuildEventId{
+		Id: &bep.BuildEventId_TargetConfigured{
+			TargetConfigured: &bep.BuildEventId_TargetConfiguredId{Label: "//pkg:lib"},
+		},
+	}
+
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-abort-4", "uuid-abort-4", "build", 1),
+		makeAbortedOBE(t, "inv-abort-4", 2, bep.Aborted_LOADING_FAILURE, "bad BUILD file", targetID),
+		makeBuildFinishedOBE(t, "inv-abort-4", 3, 1, "FAILURE"),
+	)
+
+	span := findRootSpan(t, sink)
+	reason, ok := span.Attributes().Get("bazel.abort.reason")
+	require.True(t, ok)
+	assert.Equal(t, "loading_failure", reason.Str())
+}
+
+func TestAbortReasonString_AllEnumValues(t *testing.T) {
+	cases := []struct {
+		reason bep.Aborted_AbortReason
+		want   string
+	}{
+		{bep.Aborted_UNKNOWN, "unknown"},
+		{bep.Aborted_USER_INTERRUPTED, "user_interrupted"},
+		{bep.Aborted_NO_ANALYZE, "no_analyze"},
+		{bep.Aborted_NO_BUILD, "no_build"},
+		{bep.Aborted_TIME_OUT, "time_out"},
+		{bep.Aborted_REMOTE_ENVIRONMENT_FAILURE, "remote_environment_failure"},
+		{bep.Aborted_INTERNAL, "internal"},
+		{bep.Aborted_LOADING_FAILURE, "loading_failure"},
+		{bep.Aborted_ANALYSIS_FAILURE, "analysis_failure"},
+		{bep.Aborted_SKIPPED, "skipped"},
+		{bep.Aborted_INCOMPLETE, "incomplete"},
+		{bep.Aborted_OUT_OF_MEMORY, "out_of_memory"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.want, func(t *testing.T) {
+			assert.Equal(t, tc.want, abortReasonString(tc.reason))
+		})
+	}
 }

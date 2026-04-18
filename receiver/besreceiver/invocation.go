@@ -2,6 +2,7 @@ package besreceiver
 
 import (
 	"strconv"
+	"strings"
 	"time"
 
 	"go.opentelemetry.io/collector/pdata/pcommon"
@@ -45,6 +46,13 @@ type invocationState struct {
 	// Keyed by label, each entry is a list of span indices (into scopeSpans.Spans())
 	// that should be reparented when addTarget is called for that label.
 	orphanedSpans map[string][]int
+
+	// abortRecorded is set on the first Aborted event. Subsequent aborts are
+	// logged but do not overwrite the original reason / description, which are
+	// preserved as the root-cause signal on the root span.
+	abortRecorded    bool
+	abortReason      string
+	abortDescription string
 }
 
 func newInvocationState(traceID pcommon.TraceID, rootSpanID pcommon.SpanID, started *bep.BuildStarted, now time.Time) *invocationState {
@@ -193,6 +201,23 @@ func (s *invocationState) finalize(finished *bep.BuildFinished) (ptrace.Traces, 
 		return ptrace.Traces{}, false
 	}
 
+	s.writeRootSpan(finished)
+
+	s.flushed = true
+	s.orphanedSpans = nil
+	return s.pendingTraces, true
+}
+
+// writeRootSpan appends the root bazel.build span to the pending traces batch.
+// finished may be nil when the root span is emitted without BuildFinished
+// (e.g. the reaper flushing an aborted build that never sent BuildFinished).
+//
+// When abortRecorded is true, abort attributes are written alongside any
+// existing exit-code attributes and the status message is set to
+// "aborted: <reason>: <description>". Abort is the root cause, so its
+// status takes precedence; the exit code is the consequence and its
+// attributes remain for observability.
+func (s *invocationState) writeRootSpan(finished *bep.BuildFinished) {
 	span := s.appendSpan()
 	span.SetSpanID(s.rootSpanID)
 	// command is a free-form string in the proto, but in practice bounded to
@@ -208,7 +233,7 @@ func (s *invocationState) finalize(finished *bep.BuildFinished) (ptrace.Traces, 
 	if s.started != nil && s.started.GetStartTime() != nil {
 		span.SetStartTimestamp(pcommon.NewTimestampFromTime(s.started.GetStartTime().AsTime()))
 	}
-	if finished.GetFinishTime() != nil {
+	if finished != nil && finished.GetFinishTime() != nil {
 		span.SetEndTimestamp(pcommon.NewTimestampFromTime(finished.GetFinishTime().AsTime()))
 	}
 
@@ -219,18 +244,44 @@ func (s *invocationState) finalize(finished *bep.BuildFinished) (ptrace.Traces, 
 		span.Attributes().PutStr("bazel.workspace_directory", s.started.GetWorkspaceDirectory())
 	}
 
-	exitCode := finished.GetExitCode()
-	span.Attributes().PutStr("bazel.exit_code.name", exitCode.GetName())
-	span.Attributes().PutInt("bazel.exit_code.code", int64(exitCode.GetCode()))
+	if finished != nil {
+		exitCode := finished.GetExitCode()
+		span.Attributes().PutStr("bazel.exit_code.name", exitCode.GetName())
+		span.Attributes().PutInt("bazel.exit_code.code", int64(exitCode.GetCode()))
 
-	if exitCode.GetCode() != 0 {
-		span.Status().SetCode(ptrace.StatusCodeError)
-		span.Status().SetMessage(exitCode.GetName())
+		if exitCode.GetCode() != 0 {
+			span.Status().SetCode(ptrace.StatusCodeError)
+			span.Status().SetMessage(exitCode.GetName())
+		}
 	}
 
-	s.flushed = true
-	s.orphanedSpans = nil
-	return s.pendingTraces, true
+	if s.abortRecorded {
+		span.Attributes().PutStr("bazel.abort.reason", s.abortReason)
+		span.Attributes().PutStr("bazel.abort.description", s.abortDescription)
+		span.Status().SetCode(ptrace.StatusCodeError)
+		span.Status().SetMessage("aborted: " + s.abortReason + ": " + s.abortDescription)
+	}
+}
+
+// recordAbort stores the first abort reason and description on the invocation
+// state. Subsequent calls are no-ops — the root cause is preserved and later
+// aborts are consequences that the caller logs but does not propagate here.
+// Returns true only on the first call.
+func (s *invocationState) recordAbort(a *bep.Aborted) bool {
+	if s.abortRecorded {
+		return false
+	}
+	s.abortRecorded = true
+	s.abortReason = abortReasonString(a.GetReason())
+	s.abortDescription = a.GetDescription()
+	return true
+}
+
+// abortReasonString returns the lowercased BEP enum name for an abort reason.
+// Stable identifier for downstream queries; new enum values added by future
+// Bazel versions are handled automatically via the generated String() method.
+func abortReasonString(r bep.Aborted_AbortReason) string {
+	return strings.ToLower(r.String())
 }
 
 // buildMetricsSpan creates a standalone Traces payload for BuildMetrics.
@@ -261,9 +312,20 @@ func (s *invocationState) buildMetricsSpan(metrics *bep.BuildMetrics) ptrace.Tra
 
 // flushOrphaned returns pending traces for invocations that were never finished.
 // Used by the reaper to flush spans before deleting stale state.
+//
+// When an abort was recorded but BuildFinished never arrived, also emit the
+// root span (stamped with abort attrs via writeRootSpan) so the abort signal
+// is preserved. Otherwise the existing pending spans are flushed as-is,
+// matching prior behavior for timed-out but non-aborted invocations.
 func (s *invocationState) flushOrphaned() (ptrace.Traces, bool) {
-	if s.flushed || s.pendingTraces.SpanCount() == 0 {
+	if s.flushed {
 		return ptrace.Traces{}, false
+	}
+	if !s.abortRecorded && s.pendingTraces.SpanCount() == 0 {
+		return ptrace.Traces{}, false
+	}
+	if s.abortRecorded {
+		s.writeRootSpan(nil)
 	}
 	s.flushed = true
 	return s.pendingTraces, true
