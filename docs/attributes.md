@@ -34,17 +34,20 @@ without `BuildFinished`, from the reaper path.
 | `bazel.command`              | string | `BuildStarted.command`                                           |
 | `bazel.uuid`                 | string | `BuildStarted.uuid`                                              |
 | `bazel.build_tool_version`   | string | `BuildStarted.build_tool_version`                                |
-| `bazel.workspace_directory`  | string | `BuildStarted.workspace_directory`                               |
+| `bazel.workspace_directory`  | string | `BuildStarted.workspace_directory` — **PII**, requires `include_workspace_dir` |
+| `bazel.working_directory`    | string | `BuildStarted.working_directory` — **PII**, requires `include_working_dir`    |
+| `bazel.host`                 | string | `BuildStarted.host` — **PII**, requires `include_hostname`       |
+| `bazel.user`                 | string | `BuildStarted.user` — **PII**, requires `include_username`       |
 | `bazel.exit_code.name`       | string | `BuildFinished.exit_code.name` (absent on abort-only finalize)   |
 | `bazel.exit_code.code`       | int    | `BuildFinished.exit_code.code`                                   |
 | `bazel.abort.reason`         | string | `Aborted.reason` — lowercased enum; first abort wins             |
 | `bazel.abort.description`    | string | `Aborted.description`                                            |
-| `bazel.workspace.<key>`      | string | `WorkspaceStatus.item[*]` — keys sanitized, capped at 30         |
-| `bazel.metadata.<key>`       | string | `BuildMetadata.metadata` — keys sanitized, capped at 20          |
+| `bazel.workspace.<key>`      | string | `WorkspaceStatus.item[*]` — **PII**, requires `include_workspace_status`; per-key filtered |
+| `bazel.metadata.<key>`       | string | `BuildMetadata.metadata` — **PII**, requires `include_build_metadata`; per-key filtered    |
 | `bazel.tool_tag`             | string | `OptionsParsed.tool_tag` (e.g. CI system identifier)             |
 | `bazel.options.startup_count`| int    | `len(OptionsParsed.explicit_startup_options)`                    |
 | `bazel.options.command_count`| int    | `len(OptionsParsed.explicit_cmd_line)`                           |
-| `bazel.command_line`         | string | Reconstructed `StructuredCommandLine` ("original" label, 1024 B) |
+| `bazel.command_line`         | string | Reconstructed `StructuredCommandLine` — **PII**, requires `include_command_line` |
 
 Key sanitization for `bazel.workspace.*` and `bazel.metadata.*`: lowercase,
 collapse whitespace to `_`, strip characters outside `[a-z0-9_.]`, trim
@@ -104,10 +107,12 @@ One span per executed action, emitted from `ActionExecuted`. Name is
 
 | Attribute               | Type   | Source                           |
 |-------------------------|--------|----------------------------------|
-| `bazel.action.mnemonic` | string | `ActionExecuted.type`            |
-| `bazel.action.exit_code`| int    | `ActionExecuted.exit_code`       |
-| `bazel.action.success`  | bool   | `ActionExecuted.success`         |
-| `bazel.target.label`    | string | Owning target label (when known) |
+| `bazel.action.mnemonic`       | string       | `ActionExecuted.type`                                          |
+| `bazel.action.exit_code`      | int          | `ActionExecuted.exit_code`                                     |
+| `bazel.action.success`        | bool         | `ActionExecuted.success`                                       |
+| `bazel.target.label`          | string       | Owning target label (when known)                               |
+| `bazel.action.command_line`   | string slice | `ActionExecuted.command_line` — **PII**, requires `include_command_args` |
+| `bazel.action.primary_output` | string       | `ActionExecuted.primary_output.name` — **PII**, requires `include_action_output_paths` |
 
 Status is `ERROR` with message `"action failed"` when
 `ActionExecuted.success` is false.
@@ -142,6 +147,61 @@ action-summary aggregates for the whole build.
 | `bazel.metrics.execution_phase_time_ms`  | int  | `TimingMetrics.execution_phase_time_in_ms`|
 | `bazel.metrics.actions_created`          | int  | `ActionSummary.actions_created`           |
 | `bazel.metrics.actions_executed`         | int  | `ActionSummary.actions_executed`          |
+
+## PII controls
+
+Attributes marked **PII** above are gated by the `pii:` config block on the
+receiver. Every flag defaults to `false`, so by default none of those
+attributes are emitted. Enable them selectively based on your compliance
+posture:
+
+```yaml
+receivers:
+  bes:
+    pii:
+      include_hostname: false              # bazel.host + host-like workspace/metadata keys
+      include_username: false              # bazel.user + user-like workspace/metadata keys
+      include_workspace_dir: false         # bazel.workspace_directory + matching workspace/metadata keys
+      include_working_dir: false           # bazel.working_directory + matching workspace/metadata keys
+      include_command_args: false          # bazel.action.command_line
+      include_action_output_paths: false   # bazel.action.primary_output
+      include_workspace_status: false      # bazel.workspace.* pathway (per-key filtered)
+      include_build_metadata: false        # bazel.metadata.* pathway (per-key filtered)
+      include_command_line: false          # bazel.command_line (coarse only)
+```
+
+### Composition
+
+Flags gate by *content*, not by *pathway*. If `include_hostname: false`, no
+hostname-like attribute is emitted regardless of which BEP event carries
+it. This means the coarse gates (`include_workspace_status`,
+`include_build_metadata`) open a pathway but per-key filters still apply
+inside it.
+
+Concretely, with `include_workspace_status: true` and `include_hostname:
+false`: `bazel.workspace.stable_git_branch` is emitted (safe key), but
+`bazel.workspace.build_host` is suppressed (hostname is off).
+
+The sanitized keys matched as PII-sensitive:
+
+| Flag (when false)          | Suppresses workspace/metadata keys       |
+|----------------------------|------------------------------------------|
+| `include_hostname`         | `host`, `hostname`, `build_host`         |
+| `include_username`         | `user`, `username`, `build_user`         |
+| `include_working_dir`      | `working_dir`, `working_directory`       |
+| `include_workspace_dir`    | `workspace_dir`, `workspace_directory`   |
+
+`include_command_line` is coarse-only: the attribute is a free-form
+reconstructed string, so per-key filtering doesn't apply. Operators
+needing finer redaction of the command line should layer a
+`redactionprocessor` on the pipeline.
+
+Note that `bazel.workspace_directory` is gated — earlier receiver versions
+emitted it unconditionally. Operators who relied on it must set
+`include_workspace_dir: true` to restore the prior behavior.
+
+Non-PII attributes (`bazel.command`, `bazel.uuid`, `bazel.tool_tag`, etc.)
+are always emitted regardless of `pii:` settings.
 
 ## Use cases
 

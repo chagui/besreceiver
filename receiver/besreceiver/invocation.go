@@ -75,9 +75,12 @@ type invocationState struct {
 	startupCount int64
 	commandCount int64
 	commandLine  string
+
+	// pii opts specific BEP fields into span emission; see PIIConfig.
+	pii PIIConfig
 }
 
-func newInvocationState(traceID pcommon.TraceID, rootSpanID pcommon.SpanID, started *bep.BuildStarted, now time.Time) *invocationState {
+func newInvocationState(traceID pcommon.TraceID, rootSpanID pcommon.SpanID, started *bep.BuildStarted, now time.Time, pii PIIConfig) *invocationState {
 	traces, ss := newTracesPayload()
 	return &invocationState{
 		traceID:       traceID,
@@ -88,6 +91,7 @@ func newInvocationState(traceID pcommon.TraceID, rootSpanID pcommon.SpanID, star
 		createdAt:     now,
 		pendingTraces: traces,
 		scopeSpans:    ss,
+		pii:           pii,
 	}
 }
 
@@ -168,6 +172,20 @@ func (s *invocationState) addAction(label, configID, primaryOutput string, actio
 	span.Attributes().PutBool("bazel.action.success", action.GetSuccess())
 	if label != "" {
 		span.Attributes().PutStr("bazel.target.label", label)
+	}
+
+	if s.pii.IncludeCommandArgs {
+		if args := action.GetCommandLine(); len(args) > 0 {
+			slice := span.Attributes().PutEmptySlice("bazel.action.command_line")
+			for _, arg := range args {
+				slice.AppendEmpty().SetStr(arg)
+			}
+		}
+	}
+	if s.pii.IncludeActionOutputPaths {
+		if po := action.GetPrimaryOutput(); po != nil && po.GetName() != "" {
+			span.Attributes().PutStr("bazel.action.primary_output", po.GetName())
+		}
 	}
 
 	if !action.GetSuccess() {
@@ -266,12 +284,7 @@ func (s *invocationState) writeRootSpan(finished *bep.BuildFinished) {
 		span.SetEndTimestamp(pcommon.NewTimestampFromTime(finished.GetFinishTime().AsTime()))
 	}
 
-	if s.started != nil {
-		span.Attributes().PutStr("bazel.command", s.started.GetCommand())
-		span.Attributes().PutStr("bazel.uuid", s.started.GetUuid())
-		span.Attributes().PutStr("bazel.build_tool_version", s.started.GetBuildToolVersion())
-		span.Attributes().PutStr("bazel.workspace_directory", s.started.GetWorkspaceDirectory())
-	}
+	s.applyStartedAttributes(span)
 
 	if s.toolTag != "" {
 		span.Attributes().PutStr("bazel.tool_tag", s.toolTag)
@@ -282,7 +295,7 @@ func (s *invocationState) writeRootSpan(finished *bep.BuildFinished) {
 	if s.commandCount > 0 {
 		span.Attributes().PutInt("bazel.options.command_count", s.commandCount)
 	}
-	if s.commandLine != "" {
+	if s.pii.IncludeCommandLine && s.commandLine != "" {
 		span.Attributes().PutStr("bazel.command_line", s.commandLine)
 	}
 
@@ -304,6 +317,33 @@ func (s *invocationState) writeRootSpan(finished *bep.BuildFinished) {
 		span.Attributes().PutStr("bazel.abort.description", s.abortDescription)
 		span.Status().SetCode(ptrace.StatusCodeError)
 		span.Status().SetMessage("aborted: " + s.abortReason + ": " + s.abortDescription)
+	}
+}
+
+// applyStartedAttributes writes root-span attributes derived from the
+// BuildStarted payload, gating PII fields on PIIConfig flags.
+func (s *invocationState) applyStartedAttributes(span ptrace.Span) {
+	if s.started == nil {
+		return
+	}
+	span.Attributes().PutStr("bazel.command", s.started.GetCommand())
+	span.Attributes().PutStr("bazel.uuid", s.started.GetUuid())
+	span.Attributes().PutStr("bazel.build_tool_version", s.started.GetBuildToolVersion())
+	if s.pii.IncludeWorkspaceDir {
+		span.Attributes().PutStr("bazel.workspace_directory", s.started.GetWorkspaceDirectory())
+	}
+	if s.pii.IncludeWorkingDir {
+		span.Attributes().PutStr("bazel.working_directory", s.started.GetWorkingDirectory())
+	}
+	if s.pii.IncludeHostname {
+		if host := s.started.GetHost(); host != "" {
+			span.Attributes().PutStr("bazel.host", host)
+		}
+	}
+	if s.pii.IncludeUsername {
+		if user := s.started.GetUser(); user != "" {
+			span.Attributes().PutStr("bazel.user", user)
+		}
 	}
 }
 
@@ -333,7 +373,7 @@ func abortReasonString(r bep.Aborted_AbortReason) string {
 // with non-empty sanitized keys are stored (later duplicates overwrite on
 // sanitization collision — documented trade-off).
 func (s *invocationState) addWorkspaceItems(items []*bep.WorkspaceStatus_Item) {
-	if s.flushed {
+	if s.flushed || !s.pii.IncludeWorkspaceStatus {
 		return
 	}
 	if s.workspaceItems == nil {
@@ -345,7 +385,7 @@ func (s *invocationState) addWorkspaceItems(items []*bep.WorkspaceStatus_Item) {
 			break
 		}
 		key := sanitizeAttrKey(item.GetKey())
-		if key == "" {
+		if key == "" || s.isPIIKeySuppressed(key) {
 			continue
 		}
 		s.workspaceItems[key] = truncateAttrValue(item.GetValue())
@@ -357,7 +397,7 @@ func (s *invocationState) addWorkspaceItems(items []*bep.WorkspaceStatus_Item) {
 // span. BEP maps are unordered, so keys are sorted alphabetically before the
 // cap is applied to make truncation deterministic across reruns.
 func (s *invocationState) addBuildMetadata(md map[string]string) {
-	if s.flushed {
+	if s.flushed || !s.pii.IncludeBuildMetadata {
 		return
 	}
 	if s.buildMetadata == nil {
@@ -374,12 +414,46 @@ func (s *invocationState) addBuildMetadata(md map[string]string) {
 			break
 		}
 		key := sanitizeAttrKey(rawKey)
-		if key == "" {
+		if key == "" || s.isPIIKeySuppressed(key) {
 			continue
 		}
 		s.buildMetadata[key] = truncateAttrValue(md[rawKey])
 		kept = len(s.buildMetadata)
 	}
+}
+
+// piiHostKeys, piiUserKeys, piiWorkingDirKeys, piiWorkspaceDirKeys enumerate
+// sanitized key names that carry hostname, username, and directory-path PII.
+// Matches are exact (the sanitizer has already lowercased and normalized
+// punctuation). Keep each set small and obvious — the intent is to catch the
+// common workspace-status / build_metadata conventions, not to be exhaustive.
+//
+//nolint:gochecknoglobals // immutable lookup tables; Go has no map const
+var (
+	piiHostKeys         = map[string]struct{}{"host": {}, "hostname": {}, "build_host": {}}
+	piiUserKeys         = map[string]struct{}{"user": {}, "username": {}, "build_user": {}}
+	piiWorkingDirKeys   = map[string]struct{}{"working_dir": {}, "working_directory": {}}
+	piiWorkspaceDirKeys = map[string]struct{}{"workspace_dir": {}, "workspace_directory": {}}
+)
+
+// isPIIKeySuppressed returns true when a sanitized workspace-status or
+// build-metadata key carries PII whose specific PII flag is off. Used to
+// filter per-key even when the coarse IncludeWorkspaceStatus /
+// IncludeBuildMetadata gate is open.
+func (s *invocationState) isPIIKeySuppressed(sanitizedKey string) bool {
+	if _, ok := piiHostKeys[sanitizedKey]; ok && !s.pii.IncludeHostname {
+		return true
+	}
+	if _, ok := piiUserKeys[sanitizedKey]; ok && !s.pii.IncludeUsername {
+		return true
+	}
+	if _, ok := piiWorkingDirKeys[sanitizedKey]; ok && !s.pii.IncludeWorkingDir {
+		return true
+	}
+	if _, ok := piiWorkspaceDirKeys[sanitizedKey]; ok && !s.pii.IncludeWorkspaceDir {
+		return true
+	}
+	return false
 }
 
 // completeTarget applies TargetComplete attributes to the target span stored

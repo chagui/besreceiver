@@ -46,6 +46,7 @@ type TraceBuilderConfig struct {
 	InvocationTimeout time.Duration
 	ReaperInterval    time.Duration
 	MeterProvider     metric.MeterProvider
+	PII               PIIConfig
 }
 
 // TraceBuilder converts BEP events into OTel traces, logs, and metrics.
@@ -61,6 +62,11 @@ type TraceBuilder struct {
 	stopCh            chan struct{}
 	doneCh            chan struct{}
 	stopOnce          sync.Once
+
+	// PII gates sensitive-field emission on spans. Threaded into per-invocation
+	// state so finalize/addAction can make the decision locally without re-
+	// reaching into the builder.
+	pii PIIConfig
 
 	// Cumulative counters for cross-invocation metrics.
 	counters *cumulativeCounters
@@ -105,6 +111,7 @@ func NewTraceBuilder(tracesConsumer consumer.Traces, logsConsumer consumer.Logs,
 		logger:            logger,
 		invocationTimeout: cfg.InvocationTimeout,
 		reaperInterval:    cfg.ReaperInterval,
+		pii:               cfg.PII,
 		counters:          newCumulativeCounters(pcommon.NewTimestampFromTime(time.Now())),
 		activeInvocations: activeInvocations,
 		eventsProcessed:   eventsProcessed,
@@ -310,7 +317,7 @@ func eventTypeName(event *bep.BuildEvent) string {
 func (tb *TraceBuilder) handleBuildStarted(ctx context.Context, invocations map[string]*invocationState, invocationID string, started *bep.BuildStarted) error {
 	traceID := traceIDFromUUID(started.GetUuid())
 	rootSpanID := spanIDFromIdentity(started.GetUuid(), "root")
-	invocations[invocationID] = newInvocationState(traceID, rootSpanID, started, time.Now())
+	invocations[invocationID] = newInvocationState(traceID, rootSpanID, started, time.Now(), tb.pii)
 	tb.activeInvocations.Add(ctx, 1)
 
 	tb.logger.Debug("Build started",

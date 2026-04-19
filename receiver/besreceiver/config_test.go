@@ -25,6 +25,38 @@ func TestConfigDefaults(t *testing.T) {
 	}
 }
 
+func TestConfigDefaults_PII(t *testing.T) {
+	cfg := createDefaultConfig().(*Config)
+	// All PII flags must default to false — the breaking change is load-bearing.
+	if cfg.PII.IncludeHostname {
+		t.Error("IncludeHostname must default to false")
+	}
+	if cfg.PII.IncludeUsername {
+		t.Error("IncludeUsername must default to false")
+	}
+	if cfg.PII.IncludeWorkspaceDir {
+		t.Error("IncludeWorkspaceDir must default to false")
+	}
+	if cfg.PII.IncludeWorkingDir {
+		t.Error("IncludeWorkingDir must default to false")
+	}
+	if cfg.PII.IncludeCommandArgs {
+		t.Error("IncludeCommandArgs must default to false")
+	}
+	if cfg.PII.IncludeActionOutputPaths {
+		t.Error("IncludeActionOutputPaths must default to false")
+	}
+	if cfg.PII.IncludeWorkspaceStatus {
+		t.Error("IncludeWorkspaceStatus must default to false")
+	}
+	if cfg.PII.IncludeBuildMetadata {
+		t.Error("IncludeBuildMetadata must default to false")
+	}
+	if cfg.PII.IncludeCommandLine {
+		t.Error("IncludeCommandLine must default to false")
+	}
+}
+
 func TestConfigCustom(t *testing.T) {
 	cfg := &Config{
 		ServerConfig: configgrpc.ServerConfig{

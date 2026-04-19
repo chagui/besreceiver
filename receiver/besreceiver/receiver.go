@@ -43,6 +43,7 @@ func (r *besReceiver) Start(ctx context.Context, host component.Host) error {
 			InvocationTimeout: r.config.InvocationTimeout,
 			ReaperInterval:    r.config.ReaperInterval,
 			MeterProvider:     r.settings.MeterProvider,
+			PII:               r.config.PII,
 		})
 		r.traceBuilder.Start()
 
