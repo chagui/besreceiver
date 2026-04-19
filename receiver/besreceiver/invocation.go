@@ -1,6 +1,7 @@
 package besreceiver
 
 import (
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -53,6 +54,13 @@ type invocationState struct {
 	abortRecorded    bool
 	abortReason      string
 	abortDescription string
+
+	// workspaceItems buffers sanitized WorkspaceStatus entries until the root
+	// span is emitted. Keys are pre-sanitized; values are pre-truncated.
+	workspaceItems map[string]string
+	// buildMetadata buffers sanitized --build_metadata entries until the root
+	// span is emitted. Keys are pre-sanitized; values are pre-truncated.
+	buildMetadata map[string]string
 }
 
 func newInvocationState(traceID pcommon.TraceID, rootSpanID pcommon.SpanID, started *bep.BuildStarted, now time.Time) *invocationState {
@@ -244,6 +252,8 @@ func (s *invocationState) writeRootSpan(finished *bep.BuildFinished) {
 		span.Attributes().PutStr("bazel.workspace_directory", s.started.GetWorkspaceDirectory())
 	}
 
+	s.applyContextAttributes(span)
+
 	if finished != nil {
 		exitCode := finished.GetExitCode()
 		span.Attributes().PutStr("bazel.exit_code.name", exitCode.GetName())
@@ -282,6 +292,86 @@ func (s *invocationState) recordAbort(a *bep.Aborted) bool {
 // Bazel versions are handled automatically via the generated String() method.
 func abortReasonString(r bep.Aborted_AbortReason) string {
 	return strings.ToLower(r.String())
+}
+
+// addWorkspaceItems buffers a WorkspaceStatus payload for emission on the
+// root span. Items are kept in source order; the first maxWorkspaceItems
+// with non-empty sanitized keys are stored (later duplicates overwrite on
+// sanitization collision — documented trade-off).
+func (s *invocationState) addWorkspaceItems(items []*bep.WorkspaceStatus_Item) {
+	if s.flushed {
+		return
+	}
+	if s.workspaceItems == nil {
+		s.workspaceItems = make(map[string]string)
+	}
+	kept := len(s.workspaceItems)
+	for _, item := range items {
+		if kept >= maxWorkspaceItems {
+			break
+		}
+		key := sanitizeAttrKey(item.GetKey())
+		if key == "" {
+			continue
+		}
+		s.workspaceItems[key] = truncateAttrValue(item.GetValue())
+		kept = len(s.workspaceItems)
+	}
+}
+
+// addBuildMetadata buffers a BuildMetadata payload for emission on the root
+// span. BEP maps are unordered, so keys are sorted alphabetically before the
+// cap is applied to make truncation deterministic across reruns.
+func (s *invocationState) addBuildMetadata(md map[string]string) {
+	if s.flushed {
+		return
+	}
+	if s.buildMetadata == nil {
+		s.buildMetadata = make(map[string]string)
+	}
+	keys := make([]string, 0, len(md))
+	for k := range md {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	kept := len(s.buildMetadata)
+	for _, rawKey := range keys {
+		if kept >= maxBuildMetadataEntries {
+			break
+		}
+		key := sanitizeAttrKey(rawKey)
+		if key == "" {
+			continue
+		}
+		s.buildMetadata[key] = truncateAttrValue(md[rawKey])
+		kept = len(s.buildMetadata)
+	}
+}
+
+// applyContextAttributes writes buffered WorkspaceStatus + BuildMetadata
+// entries onto the root span. Keys are emitted in sorted order for
+// deterministic attribute listings across backends.
+func (s *invocationState) applyContextAttributes(span ptrace.Span) {
+	if len(s.workspaceItems) > 0 {
+		keys := make([]string, 0, len(s.workspaceItems))
+		for k := range s.workspaceItems {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			span.Attributes().PutStr("bazel.workspace."+k, s.workspaceItems[k])
+		}
+	}
+	if len(s.buildMetadata) > 0 {
+		keys := make([]string, 0, len(s.buildMetadata))
+		for k := range s.buildMetadata {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			span.Attributes().PutStr("bazel.metadata."+k, s.buildMetadata[k])
+		}
+	}
 }
 
 // buildMetricsSpan creates a standalone Traces payload for BuildMetrics.

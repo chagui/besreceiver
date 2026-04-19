@@ -229,6 +229,16 @@ func (tb *TraceBuilder) processEvent(ctx context.Context, invocations map[string
 			return nil
 		}
 		return tb.handleAborted(ctx, invocations, invocationID, p.Aborted)
+	case *bep.BuildEvent_WorkspaceStatus:
+		if p.WorkspaceStatus == nil {
+			return nil
+		}
+		return tb.handleWorkspaceStatus(ctx, invocations, invocationID, p.WorkspaceStatus)
+	case *bep.BuildEvent_BuildMetadata:
+		if p.BuildMetadata == nil {
+			return nil
+		}
+		return tb.handleBuildMetadata(ctx, invocations, invocationID, p.BuildMetadata)
 	}
 	return nil
 }
@@ -250,6 +260,10 @@ func eventTypeName(event *bep.BuildEvent) string {
 		return "build_metrics"
 	case *bep.BuildEvent_Aborted:
 		return "aborted"
+	case *bep.BuildEvent_WorkspaceStatus:
+		return "workspace_status"
+	case *bep.BuildEvent_BuildMetadata:
+		return "build_metadata"
 	default:
 		return "other"
 	}
@@ -469,6 +483,36 @@ func (tb *TraceBuilder) handleAborted(ctx context.Context, invocations map[strin
 		},
 	)
 
+	return nil
+}
+
+// handleWorkspaceStatus buffers WorkspaceStatus items on the invocation state
+// for emission as bazel.workspace.* attributes on the root span.
+func (tb *TraceBuilder) handleWorkspaceStatus(_ context.Context, invocations map[string]*invocationState, invocationID string, ws *bep.WorkspaceStatus) error {
+	state := invocations[invocationID]
+	if state == nil {
+		return nil
+	}
+	state.addWorkspaceItems(ws.GetItem())
+	tb.logger.Debug("Workspace status received",
+		zap.String("invocation_id", invocationID),
+		zap.Int("items", len(ws.GetItem())),
+	)
+	return nil
+}
+
+// handleBuildMetadata buffers BuildMetadata entries on the invocation state
+// for emission as bazel.metadata.* attributes on the root span.
+func (tb *TraceBuilder) handleBuildMetadata(_ context.Context, invocations map[string]*invocationState, invocationID string, bm *bep.BuildMetadata) error {
+	state := invocations[invocationID]
+	if state == nil {
+		return nil
+	}
+	state.addBuildMetadata(bm.GetMetadata())
+	tb.logger.Debug("Build metadata received",
+		zap.String("invocation_id", invocationID),
+		zap.Int("entries", len(bm.GetMetadata())),
+	)
 	return nil
 }
 
