@@ -2,10 +2,10 @@ package besreceiver
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -249,7 +249,7 @@ func eventTypeName(event *bep.BuildEvent) string {
 
 func (tb *TraceBuilder) handleBuildStarted(ctx context.Context, invocations map[string]*invocationState, invocationID string, started *bep.BuildStarted) error {
 	traceID := traceIDFromUUID(started.GetUuid())
-	rootSpanID := newSpanID()
+	rootSpanID := spanIDFromIdentity(started.GetUuid(), "root")
 	invocations[invocationID] = newInvocationState(traceID, rootSpanID, started, time.Now())
 	tb.activeInvocations.Add(ctx, 1)
 
@@ -316,12 +316,14 @@ func (tb *TraceBuilder) handleActionExecuted(ctx context.Context, invocations ma
 	ac := eventID.GetActionCompleted()
 	label := ""
 	configID := ""
+	primaryOutput := ""
 	if ac != nil {
 		label = ac.GetLabel()
 		configID = ac.GetConfiguration().GetId()
+		primaryOutput = ac.GetPrimaryOutput()
 	}
 
-	state.addAction(label, configID, action)
+	state.addAction(label, configID, primaryOutput, action)
 
 	severity := plog.SeverityNumberInfo
 	body := fmt.Sprintf("Action completed: %s %s", action.GetType(), label)
@@ -558,9 +560,13 @@ func traceIDFromUUID(uuid string) pcommon.TraceID {
 	return tid
 }
 
-func newSpanID() pcommon.SpanID {
+// spanIDFromIdentity deterministically derives a SpanID from the given identity parts.
+// Parts are joined with a NUL separator and SHA-256'd; bytes [16:24] are used so
+// SpanIDs never overlap with TraceID bytes (which use [0:16]).
+func spanIDFromIdentity(parts ...string) pcommon.SpanID {
+	h := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
 	var sid pcommon.SpanID
-	_, _ = rand.Read(sid[:])
+	copy(sid[:], h[16:24])
 	return sid
 }
 

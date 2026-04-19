@@ -1,6 +1,7 @@
 package besreceiver
 
 import (
+	"strconv"
 	"time"
 
 	"go.opentelemetry.io/collector/pdata/pcommon"
@@ -32,6 +33,7 @@ import (
 type invocationState struct {
 	traceID       pcommon.TraceID
 	rootSpanID    pcommon.SpanID
+	uuid          string                    // Bazel invocation UUID, used to seed span-identity strings
 	targets       map[string]pcommon.SpanID // "label\x00configID" → spanID
 	started       *bep.BuildStarted         // buffered for deferred root span emission
 	createdAt     time.Time
@@ -50,6 +52,7 @@ func newInvocationState(traceID pcommon.TraceID, rootSpanID pcommon.SpanID, star
 	return &invocationState{
 		traceID:       traceID,
 		rootSpanID:    rootSpanID,
+		uuid:          started.GetUuid(),
 		targets:       make(map[string]pcommon.SpanID),
 		started:       started,
 		createdAt:     now,
@@ -74,7 +77,7 @@ func (s *invocationState) addTarget(label, ruleKind string) {
 		return
 	}
 
-	spanID := newSpanID()
+	spanID := spanIDFromIdentity(s.uuid, "target", label)
 	s.targets[targetKey(label, "")] = spanID
 
 	span := s.appendSpan()
@@ -92,7 +95,7 @@ func (s *invocationState) addTarget(label, ruleKind string) {
 	s.reparentOrphans(label, spanID)
 }
 
-func (s *invocationState) addAction(label, configID string, action *bep.ActionExecuted) {
+func (s *invocationState) addAction(label, configID, primaryOutput string, action *bep.ActionExecuted) {
 	if s.flushed {
 		return
 	}
@@ -101,7 +104,7 @@ func (s *invocationState) addAction(label, configID string, action *bep.ActionEx
 
 	spanIdx := s.scopeSpans.Spans().Len()
 	span := s.appendSpan()
-	span.SetSpanID(newSpanID())
+	span.SetSpanID(spanIDFromIdentity(s.uuid, "action", label, action.GetType(), primaryOutput))
 
 	// If the target hasn't been configured yet, record this span for
 	// deferred reparenting when addTarget is called.
@@ -145,7 +148,11 @@ func (s *invocationState) addTestResult(label, configID string, tr *bep.BuildEve
 
 	spanIdx := s.scopeSpans.Spans().Len()
 	span := s.appendSpan()
-	span.SetSpanID(newSpanID())
+	span.SetSpanID(spanIDFromIdentity(s.uuid, "test", label,
+		strconv.Itoa(int(tr.GetRun())),
+		strconv.Itoa(int(tr.GetShard())),
+		strconv.Itoa(int(tr.GetAttempt())),
+	))
 
 	if !resolved && label != "" {
 		s.recordOrphan(label, spanIdx)
@@ -233,7 +240,7 @@ func (s *invocationState) buildMetricsSpan(metrics *bep.BuildMetrics) ptrace.Tra
 
 	span := ss.Spans().AppendEmpty()
 	span.SetTraceID(s.traceID)
-	span.SetSpanID(newSpanID())
+	span.SetSpanID(spanIDFromIdentity(s.uuid, "metrics"))
 	span.SetParentSpanID(s.rootSpanID)
 	span.SetName("bazel.metrics")
 	span.SetKind(ptrace.SpanKindInternal)
