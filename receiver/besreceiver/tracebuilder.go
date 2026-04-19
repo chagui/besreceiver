@@ -184,6 +184,7 @@ func (tb *TraceBuilder) ProcessOrderedBuildEvent(ctx context.Context, obe *pb.Or
 	}
 }
 
+//nolint:gocyclo // Flat payload dispatch: grows as the receiver handles more BEP event types. Splitting by payload family would hurt discoverability.
 func (tb *TraceBuilder) processEvent(ctx context.Context, invocations map[string]*invocationState, invocationID string, event *bep.BuildEvent) error {
 	tb.eventsProcessed.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("event_type", eventTypeName(event)),
@@ -223,6 +224,11 @@ func (tb *TraceBuilder) processEvent(ctx context.Context, invocations map[string
 			return nil
 		}
 		return tb.handleBuildMetrics(ctx, invocations, invocationID, p.BuildMetrics)
+	case *bep.BuildEvent_Aborted:
+		if p.Aborted == nil {
+			return nil
+		}
+		return tb.handleAborted(ctx, invocations, invocationID, p.Aborted)
 	}
 	return nil
 }
@@ -242,6 +248,8 @@ func eventTypeName(event *bep.BuildEvent) string {
 		return "finished"
 	case *bep.BuildEvent_BuildMetrics:
 		return "build_metrics"
+	case *bep.BuildEvent_Aborted:
+		return "aborted"
 	default:
 		return "other"
 	}
@@ -419,6 +427,49 @@ func (tb *TraceBuilder) handleBuildFinished(ctx context.Context, invocations map
 	// Don't delete state yet — BuildMetrics may arrive after BuildFinished.
 	// State cleanup is handled by handleBuildMetrics or the stale invocation reaper.
 	return tb.consumeAndRecord(ctx, traces)
+}
+
+// handleAborted records the first abort reason + description on the invocation
+// state. Abort attributes are stamped on the root span at finalize time (or
+// flushOrphaned for reaped invocations). Subsequent aborts are logged at Warn
+// but do not overwrite the original root cause.
+func (tb *TraceBuilder) handleAborted(ctx context.Context, invocations map[string]*invocationState, invocationID string, aborted *bep.Aborted) error {
+	state := invocations[invocationID]
+	if state == nil {
+		tb.logger.Debug("Aborted event dropped — no invocation state",
+			zap.String("invocation_id", invocationID),
+		)
+		return nil
+	}
+
+	reason := abortReasonString(aborted.GetReason())
+	description := aborted.GetDescription()
+	first := state.recordAbort(aborted)
+
+	if first {
+		tb.logger.Debug("Build aborted",
+			zap.String("invocation_id", invocationID),
+			zap.String("reason", reason),
+			zap.String("description", description),
+		)
+	} else {
+		tb.logger.Warn("Additional abort event received; keeping first reason",
+			zap.String("invocation_id", invocationID),
+			zap.String("first_reason", state.abortReason),
+			zap.String("new_reason", reason),
+		)
+	}
+
+	tb.emitLog(ctx, state, invocationID, "bazel.build.aborted",
+		fmt.Sprintf("Build aborted: %s: %s", reason, description),
+		plog.SeverityNumberError, time.Time{},
+		map[string]string{
+			"bazel.abort.reason":      reason,
+			"bazel.abort.description": description,
+		},
+	)
+
+	return nil
 }
 
 func (tb *TraceBuilder) handleBuildMetrics(ctx context.Context, invocations map[string]*invocationState, invocationID string, metrics *bep.BuildMetrics) error {
