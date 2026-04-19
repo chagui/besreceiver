@@ -15,6 +15,8 @@ exporters:
 processors:
   - gomod: go.opentelemetry.io/collector/processor/batchprocessor v0.146.1
   - gomod: go.opentelemetry.io/collector/processor/memorylimiterprocessor v0.146.1
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/processor/redactionprocessor v0.146.0
 
 extensions:
   - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/extension/healthcheckextension v0.146.0
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/extension/bearertokenauthextension v0.146.0
