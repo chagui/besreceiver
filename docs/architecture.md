@@ -1,87 +1,13 @@
 # Architecture
 
-## System Overview
+## End-to-end data flow
 
-```mermaid
-graph TD
-    subgraph "Build Machines"
-        B1[Bazel Build 1<br/>--bes_backend=grpc://collector:8082]
-        B2[Bazel Build 2]
-        B3[Bazel Build N]
-    end
+![End-to-end pipeline: Bazel CLI → besreceiver (inside OTel Collector) → batch processor + OTLP exporter → Datadog / Tempo / Jaeger](architecture-pipeline.svg)
 
-    subgraph "OTel Collector (otelcol-bazel)"
-        subgraph "besreceiver"
-            GRPC[gRPC BES Server<br/>:8082]
-            PARSER[BEP Parser<br/>anypb.Any → BuildEvent]
-            TB[Trace Builder<br/>BEP events → ptrace.Traces]
-        end
-        BATCH[Batch Processor]
-        subgraph "Exporters"
-            EXP_DD[OTLP Exporter<br/>→ Datadog Agent]
-            EXP_TEMPO[OTLP Exporter<br/>→ Grafana Tempo]
-            EXP_DEBUG[Debug Exporter<br/>→ stdout]
-        end
-    end
+## Internal components
 
-    subgraph "Observability Backends"
-        DD[Datadog]
-        TEMPO[Grafana Tempo]
-    end
+![Internal components: concurrent gRPC goroutines feed a buffered eventCh, a single owner goroutine in tracebuilder.go processes events against the invocations map and invocationState, the reaper flushes stale invocations, and metricsbuilder emits gauges and cumulative counters to the traces/logs/metrics consumers](architecture-components.svg)
 
-    B1 -- "gRPC stream<br/>PublishBuildToolEventStream" --> GRPC
-    B2 -- "gRPC stream" --> GRPC
-    B3 -- "gRPC stream" --> GRPC
-    GRPC --> PARSER
-    PARSER --> TB
-    TB -- "consumer.ConsumeTraces()" --> BATCH
-    BATCH --> EXP_DD
-    BATCH --> EXP_TEMPO
-    BATCH --> EXP_DEBUG
-    EXP_DD -- "OTLP gRPC :4317" --> DD
-    EXP_TEMPO -- "OTLP gRPC :4317" --> TEMPO
-```
+## Span hierarchy per Bazel invocation
 
-## Internal Component Architecture
-
-```mermaid
-graph LR
-    subgraph "receiver/besreceiver"
-        direction TB
-        CFG[config.go<br/>configgrpc.ServerConfig]
-        FAC[factory.go<br/>NewFactory]
-        RCV[receiver.go<br/>Start / Shutdown<br/>PublishBuildToolEventStream]
-        BPP[bepparser.go<br/>ParseBazelEvent]
-        TRB[tracebuilder.go<br/>invocationState<br/>BEP → ptrace.Traces]
-    end
-
-    FAC --> RCV
-    CFG --> FAC
-    RCV --> BPP
-    BPP --> TRB
-    TRB --> CON[consumer.Traces]
-```
-
-## Trace Span Hierarchy
-
-A single Bazel invocation produces one trace with this span tree:
-
-```mermaid
-graph TD
-    ROOT["bazel.build<br/>traceID: from invocation UUID<br/>command: build | test<br/>start_time → finish_time"]
-    T1["bazel.target<br/>//pkg:library<br/>rule_kind: java_library"]
-    T2["bazel.target<br/>//pkg:test<br/>rule_kind: java_test"]
-    A1["bazel.action<br/>mnemonic: Javac<br/>start_time → end_time<br/>exit_code: 0"]
-    A2["bazel.action<br/>mnemonic: Turbine<br/>start_time → end_time"]
-    A3["bazel.action<br/>mnemonic: JavacTurbine<br/>start_time → end_time"]
-    TR1["bazel.test<br/>shard: 0, run: 1, attempt: 1<br/>status: PASSED<br/>duration: 3.2s"]
-    TR2["bazel.test<br/>shard: 1, run: 1, attempt: 1<br/>status: PASSED<br/>duration: 2.8s"]
-
-    ROOT --> T1
-    ROOT --> T2
-    T1 --> A1
-    T1 --> A2
-    T2 --> A3
-    T2 --> TR1
-    T2 --> TR2
-```
+![Span hierarchy: bazel.build root span fans out to bazel.target spans (each with child bazel.action spans and bazel.test shard spans) and one bazel.metrics span; PII-gated attributes and deterministic trace/span IDs called out in side legends](architecture-spans.svg)
