@@ -2,9 +2,11 @@ package besreceiver
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"sort"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/collector/pdata/pmetric"
@@ -13,9 +15,11 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/anypb"
+	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	bep "github.com/chagui/besreceiver/internal/bep/buildeventstream"
+	"github.com/chagui/besreceiver/internal/bep/failuredetails"
 )
 
 // --- Mock gRPC stream ---
@@ -233,6 +237,49 @@ func makeTargetConfiguredOBE(t testing.TB, invID, label string, seqNum int64) *p
 		Payload: &bep.BuildEvent_Configured{
 			Configured: &bep.TargetConfigured{TargetKind: "java_library rule"},
 		},
+	})
+}
+
+func makeTargetCompleteOBE(t testing.TB, invID, label string, seqNum int64, success bool, testTimeout time.Duration, failureMsg string, outputGroupCount int) *pb.OrderedBuildEvent {
+	t.Helper()
+	tc := &bep.TargetComplete{Success: success}
+	if testTimeout > 0 {
+		tc.TestTimeout = durationpb.New(testTimeout)
+	}
+	if failureMsg != "" {
+		tc.FailureDetail = &failuredetails.FailureDetail{Message: failureMsg}
+	}
+	for i := range outputGroupCount {
+		tc.OutputGroup = append(tc.OutputGroup, &bep.OutputGroup{Name: fmt.Sprintf("group-%d", i)})
+	}
+	return makeOrderedBuildEvent(t, invID, seqNum, &bep.BuildEvent{
+		Id: &bep.BuildEventId{
+			Id: &bep.BuildEventId_TargetCompleted{
+				TargetCompleted: &bep.BuildEventId_TargetCompletedId{Label: label},
+			},
+		},
+		Payload: &bep.BuildEvent_Completed{Completed: tc},
+	})
+}
+
+func makeTestSummaryOBE(t testing.TB, invID, label string, seqNum int64, status bep.TestStatus, totalRun, shards, cached int32, dur time.Duration) *pb.OrderedBuildEvent {
+	t.Helper()
+	ts := &bep.TestSummary{
+		OverallStatus:  status,
+		TotalRunCount:  totalRun,
+		ShardCount:     shards,
+		TotalNumCached: cached,
+	}
+	if dur > 0 {
+		ts.TotalRunDuration = durationpb.New(dur)
+	}
+	return makeOrderedBuildEvent(t, invID, seqNum, &bep.BuildEvent{
+		Id: &bep.BuildEventId{
+			Id: &bep.BuildEventId_TestSummary{
+				TestSummary: &bep.BuildEventId_TestSummaryId{Label: label},
+			},
+		},
+		Payload: &bep.BuildEvent_TestSummary{TestSummary: ts},
 	})
 }
 
