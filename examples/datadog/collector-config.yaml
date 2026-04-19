@@ -1,9 +1,12 @@
 extensions:
   health_check:
+    # Bound to 0.0.0.0 so the kubelet / sidecar probe can reach it from the pod network.
     endpoint: "0.0.0.0:13133"
 
 receivers:
   bes:
+    # Bound to 0.0.0.0 so Bazel clients outside the pod (or sibling containers)
+    # can reach the BES gRPC endpoint. For local development, prefer "localhost:8082".
     endpoint: "0.0.0.0:8082"
 
 processors:
@@ -43,6 +46,8 @@ service:
         - pull:
             exporter:
               prometheus:
+                # Bound to 0.0.0.0 so the Datadog Agent (or any in-cluster scraper)
+                # can pull metrics across the pod network.
                 host: "0.0.0.0"
                 port: 8888
   pipelines:
