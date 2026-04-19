@@ -7,6 +7,8 @@
 
 An OpenTelemetry Collector custom receiver designed to receive [Bazel Build Event Protocol (BEP)](https://bazel.build/remote/bep) streams via the BES gRPC API and converts them into the OpenTelemetry trace model. Bazel builds become trace flamegraphs in Datadog, Tempo, Jaeger, or any OTLP backend.
 
+![End-to-end pipeline: Bazel CLI → besreceiver (inside OTel Collector) → batch processor + OTLP exporter → Datadog / Tempo / Jaeger](docs/architecture-pipeline.svg)
+
 ## Quick start
 
 ### Build the custom collector
@@ -68,7 +70,7 @@ make fuzz       # Run fuzz tests
 
 ## Documentation
 
-- [Architecture](docs/architecture.md) -- system overview and Mermaid diagrams
+- [Architecture](docs/architecture.md) -- system overview, internal components, and span hierarchy
 - [Sequence diagrams](docs/sequence.md) -- BEP stream processing flow
 
 ## License

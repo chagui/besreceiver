@@ -1,0 +1,73 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="160" viewBox="0 0 1200 160">
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+    .fill-bazel    { fill: #dbeafe; stroke: #3b82f6; }
+    .fill-recv     { fill: #d1fae5; stroke: #059669; }
+    .fill-consumer { fill: #e0f2fe; stroke: #0284c7; }
+    .fill-backend  { fill: #f1f5f9; stroke: #64748b; }
+    .label-main  { font-size: 13px; font-weight: 600; fill: #1a1a2e; }
+    .label-sub   { font-size: 11px; fill: #475569; }
+    .label-mono  { font-size: 11px; font-family: "SF Mono", "Fira Code", monospace; fill: #374151; }
+    .label-arrow { font-size: 11px; fill: #64748b; }
+    .label-dim   { font-size: 10px; fill: #94a3b8; }
+    .arrow { stroke: #94a3b8; stroke-width: 1.5; fill: none; }
+    .arrow-blue   { stroke: #3b82f6; }
+    .arrow-green  { stroke: #059669; }
+    .arrow-orange { stroke: #ea580c; }
+    .arrow-dashed { stroke-dasharray: 5 3; }
+  </style>
+  <defs>
+    <marker id="arrowhead" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#94a3b8"/>
+    </marker>
+    <marker id="arrowhead-blue" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#3b82f6"/>
+    </marker>
+    <marker id="arrowhead-green" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#059669"/>
+    </marker>
+    <marker id="arrowhead-orange" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto">
+      <polygon points="0 0, 8 3, 0 6" fill="#ea580c"/>
+    </marker>
+  </defs>
+
+  <rect width="100%" height="100%" fill="#ffffff"/>
+
+  <rect x="10" y="40" width="160" height="80" rx="10" class="fill-bazel"/>
+  <text x="90" y="72" text-anchor="middle" class="label-main">Bazel CLI</text>
+  <text x="90" y="90" text-anchor="middle" class="label-mono">--bes_backend=</text>
+  <text x="90" y="104" text-anchor="middle" class="label-mono">grpc://host:8082</text>
+
+  <line x1="170" y1="80" x2="375" y2="80" class="arrow arrow-blue" marker-end="url(#arrowhead-blue)"/>
+  <text x="272" y="68" text-anchor="middle" class="label-arrow">BES gRPC</text>
+  <text x="272" y="96" text-anchor="middle" class="label-dim">bidirectional stream</text>
+
+  <rect x="358" y="10" width="450" height="140" rx="12" fill="none" stroke="#c7d2fe" stroke-width="2" stroke-dasharray="6 3"/>
+  <text x="372" y="28" class="label-dim" font-weight="700" fill="#818cf8">OTel Collector</text>
+
+  <rect x="378" y="36" width="200" height="88" rx="8" class="fill-recv"/>
+  <text x="478" y="62" text-anchor="middle" class="label-main">besreceiver</text>
+  <text x="478" y="80" text-anchor="middle" class="label-sub">gRPC server · BEP parser</text>
+  <text x="478" y="96" text-anchor="middle" class="label-sub">trace builder · metrics builder</text>
+  <text x="478" y="113" text-anchor="middle" class="label-mono">:8082</text>
+
+  <line x1="578" y1="80" x2="648" y2="80" class="arrow arrow-green" marker-end="url(#arrowhead-green)"/>
+
+  <rect x="648" y="52" width="140" height="56" rx="8" class="fill-consumer"/>
+  <text x="718" y="77" text-anchor="middle" class="label-main">batch processor</text>
+  <text x="718" y="95" text-anchor="middle" class="label-sub">+ OTLP exporter</text>
+
+  <line x1="788" y1="80" x2="968" y2="80" class="arrow arrow-orange" marker-end="url(#arrowhead-orange)"/>
+  <text x="878" y="68" text-anchor="middle" class="label-arrow">OTLP/gRPC</text>
+
+  <rect x="970" y="30" width="130" height="42" rx="8" class="fill-backend"/>
+  <text x="1035" y="49" text-anchor="middle" class="label-main" font-size="12">Datadog</text>
+  <text x="1035" y="64" text-anchor="middle" class="label-sub">APM Traces</text>
+
+  <rect x="970" y="82" width="130" height="42" rx="8" class="fill-backend"/>
+  <text x="1035" y="101" text-anchor="middle" class="label-main" font-size="12">Tempo / Jaeger</text>
+  <text x="1035" y="116" text-anchor="middle" class="label-sub">any OTLP backend</text>
+
+  <path d="M378,96 Q272,124 170,96" class="arrow arrow-dashed" stroke="#3b82f6" stroke-width="1.5" fill="none" marker-end="url(#arrowhead-blue)"/>
+  <text x="272" y="138" text-anchor="middle" class="label-dim">ACK</text>
+</svg>
