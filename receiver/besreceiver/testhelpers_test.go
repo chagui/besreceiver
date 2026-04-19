@@ -19,6 +19,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	bep "github.com/chagui/besreceiver/internal/bep/buildeventstream"
+	"github.com/chagui/besreceiver/internal/bep/commandline"
 	"github.com/chagui/besreceiver/internal/bep/failuredetails"
 )
 
@@ -260,6 +261,110 @@ func makeTargetCompleteOBE(t testing.TB, invID, label string, seqNum int64, succ
 		},
 		Payload: &bep.BuildEvent_Completed{Completed: tc},
 	})
+}
+
+// makeTargetConfiguredWithConfigOBE is like makeTargetConfiguredOBE but
+// attaches a TargetCompleted child event id carrying a configuration id so
+// handleTargetConfigured can resolve the matching Configuration.
+func makeTargetConfiguredWithConfigOBE(t testing.TB, invID, label, configID string, seqNum int64) *pb.OrderedBuildEvent {
+	t.Helper()
+	return makeOrderedBuildEvent(t, invID, seqNum, &bep.BuildEvent{
+		Id: &bep.BuildEventId{
+			Id: &bep.BuildEventId_TargetConfigured{
+				TargetConfigured: &bep.BuildEventId_TargetConfiguredId{Label: label},
+			},
+		},
+		Children: []*bep.BuildEventId{{
+			Id: &bep.BuildEventId_TargetCompleted{
+				TargetCompleted: &bep.BuildEventId_TargetCompletedId{
+					Label:         label,
+					Configuration: &bep.BuildEventId_ConfigurationId{Id: configID},
+				},
+			},
+		}},
+		Payload: &bep.BuildEvent_Configured{
+			Configured: &bep.TargetConfigured{TargetKind: "java_library rule"},
+		},
+	})
+}
+
+func makeConfigurationOBE(t testing.TB, invID, configID, mnemonic, platform, cpu string, isTool bool, seqNum int64) *pb.OrderedBuildEvent {
+	t.Helper()
+	return makeOrderedBuildEvent(t, invID, seqNum, &bep.BuildEvent{
+		Id: &bep.BuildEventId{
+			Id: &bep.BuildEventId_Configuration{
+				Configuration: &bep.BuildEventId_ConfigurationId{Id: configID},
+			},
+		},
+		Payload: &bep.BuildEvent_Configuration{
+			Configuration: &bep.Configuration{
+				Mnemonic:     mnemonic,
+				PlatformName: platform,
+				Cpu:          cpu,
+				IsTool:       isTool,
+			},
+		},
+	})
+}
+
+func makeOptionsParsedOBE(t testing.TB, invID, toolTag string, startup, cmd []string, seqNum int64) *pb.OrderedBuildEvent {
+	t.Helper()
+	return makeOrderedBuildEvent(t, invID, seqNum, &bep.BuildEvent{
+		Id: &bep.BuildEventId{
+			Id: &bep.BuildEventId_OptionsParsed{
+				OptionsParsed: &bep.BuildEventId_OptionsParsedId{},
+			},
+		},
+		Payload: &bep.BuildEvent_OptionsParsed{
+			OptionsParsed: &bep.OptionsParsed{
+				ToolTag:                toolTag,
+				ExplicitStartupOptions: startup,
+				ExplicitCmdLine:        cmd,
+			},
+		},
+	})
+}
+
+func makeStructuredCommandLineOBE(t testing.TB, invID, label string, sections []*commandline.CommandLineSection, seqNum int64) *pb.OrderedBuildEvent {
+	t.Helper()
+	return makeOrderedBuildEvent(t, invID, seqNum, &bep.BuildEvent{
+		Id: &bep.BuildEventId{
+			Id: &bep.BuildEventId_StructuredCommandLine{
+				StructuredCommandLine: &bep.BuildEventId_StructuredCommandLineId{
+					CommandLineLabel: label,
+				},
+			},
+		},
+		Payload: &bep.BuildEvent_StructuredCommandLine{
+			StructuredCommandLine: &commandline.CommandLine{
+				CommandLineLabel: label,
+				Sections:         sections,
+			},
+		},
+	})
+}
+
+// chunkSection wraps a ChunkList section factory for tests.
+func chunkSection(chunks ...string) *commandline.CommandLineSection {
+	return &commandline.CommandLineSection{
+		SectionType: &commandline.CommandLineSection_ChunkList{
+			ChunkList: &commandline.ChunkList{Chunk: chunks},
+		},
+	}
+}
+
+// optionSection wraps an OptionList section factory for tests. Each option
+// is represented by its combined_form.
+func optionSection(options ...string) *commandline.CommandLineSection {
+	opts := make([]*commandline.Option, 0, len(options))
+	for _, o := range options {
+		opts = append(opts, &commandline.Option{CombinedForm: o})
+	}
+	return &commandline.CommandLineSection{
+		SectionType: &commandline.CommandLineSection_OptionList{
+			OptionList: &commandline.OptionList{Option: opts},
+		},
+	}
 }
 
 func makeTestSummaryOBE(t testing.TB, invID, label string, seqNum int64, status bep.TestStatus, totalRun, shards, cached int32, dur time.Duration) *pb.OrderedBuildEvent {

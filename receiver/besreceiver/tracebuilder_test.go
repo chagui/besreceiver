@@ -23,6 +23,7 @@ import (
 	buildpb "google.golang.org/genproto/googleapis/devtools/build/v1"
 
 	bep "github.com/chagui/besreceiver/internal/bep/buildeventstream"
+	"github.com/chagui/besreceiver/internal/bep/commandline"
 )
 
 func TestTraceBuilder_BuildStarted(t *testing.T) {
@@ -1849,4 +1850,193 @@ func TestTraceBuilder_NoTestSummary_LeavesTestAttrsAbsent(t *testing.T) {
 			"non-test target should not have bazel.target.test.* attrs; got %s", k)
 		return true
 	})
+}
+
+// --- Build configuration / command line context tests (issue #21) ---
+
+func TestTraceBuilder_Configuration_StampsTargetConfigAttrs(t *testing.T) {
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-cfg-1", "uuid-cfg-1", "build", 1),
+		makeConfigurationOBE(t, "inv-cfg-1", "k8-opt", "k8-opt", "linux-x86_64", "k8", false, 2),
+		makeTargetConfiguredWithConfigOBE(t, "inv-cfg-1", "//pkg:lib", "k8-opt", 3),
+		makeBuildFinishedOBE(t, "inv-cfg-1", 4, 0, "SUCCESS"),
+	)
+
+	span := findTargetSpan(t, sink, "//pkg:lib")
+
+	mnemonic, ok := span.Attributes().Get("bazel.target.config.mnemonic")
+	require.True(t, ok)
+	assert.Equal(t, "k8-opt", mnemonic.Str())
+
+	platform, ok := span.Attributes().Get("bazel.target.config.platform")
+	require.True(t, ok)
+	assert.Equal(t, "linux-x86_64", platform.Str())
+
+	cpu, ok := span.Attributes().Get("bazel.target.config.cpu")
+	require.True(t, ok)
+	assert.Equal(t, "k8", cpu.Str())
+
+	isTool, ok := span.Attributes().Get("bazel.target.config.is_tool")
+	require.True(t, ok)
+	assert.False(t, isTool.Bool())
+}
+
+func TestTraceBuilder_Configuration_ArrivesAfterTarget(t *testing.T) {
+	// Documents the no-back-patching contract: if Configuration arrives after
+	// the TargetConfigured it serves, the target span will lack config attrs.
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-cfg-late", "uuid-cfg-late", "build", 1),
+		makeTargetConfiguredWithConfigOBE(t, "inv-cfg-late", "//pkg:lib", "k8-opt", 2),
+		makeConfigurationOBE(t, "inv-cfg-late", "k8-opt", "k8-opt", "linux-x86_64", "k8", false, 3),
+		makeBuildFinishedOBE(t, "inv-cfg-late", 4, 0, "SUCCESS"),
+	)
+
+	span := findTargetSpan(t, sink, "//pkg:lib")
+	_, hasMnemonic := span.Attributes().Get("bazel.target.config.mnemonic")
+	assert.False(t, hasMnemonic, "late-arriving Configuration is not back-patched")
+}
+
+func TestTraceBuilder_Configuration_MissingConfigDoesNotBreak(t *testing.T) {
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-cfg-miss", "uuid-cfg-miss", "build", 1),
+		makeTargetConfiguredWithConfigOBE(t, "inv-cfg-miss", "//pkg:lib", "never-sent", 2),
+		makeBuildFinishedOBE(t, "inv-cfg-miss", 3, 0, "SUCCESS"),
+	)
+
+	span := findTargetSpan(t, sink, "//pkg:lib")
+	_, hasMnemonic := span.Attributes().Get("bazel.target.config.mnemonic")
+	assert.False(t, hasMnemonic)
+}
+
+func TestTraceBuilder_Configuration_NoneConfigIgnored(t *testing.T) {
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-cfg-none", "uuid-cfg-none", "build", 1),
+		// A "none" child config id should be treated as no config.
+		makeConfigurationOBE(t, "inv-cfg-none", "none", "phantom", "phantom-platform", "phantom", false, 2),
+		makeTargetConfiguredWithConfigOBE(t, "inv-cfg-none", "//pkg:lib", "none", 3),
+		makeBuildFinishedOBE(t, "inv-cfg-none", 4, 0, "SUCCESS"),
+	)
+
+	span := findTargetSpan(t, sink, "//pkg:lib")
+	_, hasMnemonic := span.Attributes().Get("bazel.target.config.mnemonic")
+	assert.False(t, hasMnemonic, "'none' config id should never stamp attrs")
+}
+
+func TestTraceBuilder_OptionsParsed_RootAttrs(t *testing.T) {
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-op", "uuid-op", "build", 1),
+		makeOptionsParsedOBE(t, "inv-op",
+			"gazelle-ci",
+			[]string{"--output_base=/tmp/x"},
+			[]string{"--config=ci", "//..."},
+			2,
+		),
+		makeBuildFinishedOBE(t, "inv-op", 3, 0, "SUCCESS"),
+	)
+
+	span := findRootSpan(t, sink)
+
+	tag, ok := span.Attributes().Get("bazel.tool_tag")
+	require.True(t, ok)
+	assert.Equal(t, "gazelle-ci", tag.Str())
+
+	startup, ok := span.Attributes().Get("bazel.options.startup_count")
+	require.True(t, ok)
+	assert.Equal(t, int64(1), startup.Int())
+
+	cmd, ok := span.Attributes().Get("bazel.options.command_count")
+	require.True(t, ok)
+	assert.Equal(t, int64(2), cmd.Int())
+}
+
+func TestTraceBuilder_StructuredCommandLine_OriginalOnly(t *testing.T) {
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	originalSections := []*commandline.CommandLineSection{
+		chunkSection("bazel"),
+		optionSection("--foo=bar"),
+		chunkSection("build"),
+		chunkSection("//..."),
+	}
+	canonicalSections := []*commandline.CommandLineSection{
+		chunkSection("bazel"),
+		optionSection("--foo=canonical"),
+		chunkSection("build"),
+		chunkSection("//..."),
+	}
+
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-cmd", "uuid-cmd", "build", 1),
+		makeStructuredCommandLineOBE(t, "inv-cmd", "original", originalSections, 2),
+		makeStructuredCommandLineOBE(t, "inv-cmd", "canonical", canonicalSections, 3),
+		makeBuildFinishedOBE(t, "inv-cmd", 4, 0, "SUCCESS"),
+	)
+
+	span := findRootSpan(t, sink)
+	cmd, ok := span.Attributes().Get("bazel.command_line")
+	require.True(t, ok)
+	assert.Equal(t, "bazel --foo=bar build //...", cmd.Str())
+	assert.NotContains(t, cmd.Str(), "canonical", "canonical variant must not leak into output")
+}
+
+func TestTraceBuilder_StructuredCommandLine_Truncated(t *testing.T) {
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	// 200 chunks of 10 chars each = 2000 bytes plus spaces, well over 1024.
+	longChunks := make([]string, 200)
+	for i := range longChunks {
+		longChunks[i] = strings.Repeat("x", 10)
+	}
+	sections := []*commandline.CommandLineSection{chunkSection(longChunks...)}
+
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-long", "uuid-long", "build", 1),
+		makeStructuredCommandLineOBE(t, "inv-long", "original", sections, 2),
+		makeBuildFinishedOBE(t, "inv-long", 3, 0, "SUCCESS"),
+	)
+
+	span := findRootSpan(t, sink)
+	cmd, ok := span.Attributes().Get("bazel.command_line")
+	require.True(t, ok)
+	// <= commandLineMaxBytes + ellipsis rune (3 bytes).
+	assert.LessOrEqual(t, len(cmd.Str()), commandLineMaxBytes+3)
+	assert.True(t, strings.HasSuffix(cmd.Str(), "…"), "expected truncation marker")
 }

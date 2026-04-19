@@ -61,6 +61,20 @@ type invocationState struct {
 	// buildMetadata buffers sanitized --build_metadata entries until the root
 	// span is emitted. Keys are pre-sanitized; values are pre-truncated.
 	buildMetadata map[string]string
+
+	// configurations maps config id → Configuration payload. Populated by
+	// handleConfiguration so handleTargetConfigured can stamp config attrs
+	// on the target span at creation time. No back-patching: if a
+	// Configuration arrives after its TargetConfigured, the attrs are
+	// skipped (documented ordering assumption).
+	configurations map[string]*bep.Configuration
+
+	// Root-span attrs buffered from OptionsParsed + StructuredCommandLine,
+	// applied in writeRootSpan.
+	toolTag      string
+	startupCount int64
+	commandCount int64
+	commandLine  string
 }
 
 func newInvocationState(traceID pcommon.TraceID, rootSpanID pcommon.SpanID, started *bep.BuildStarted, now time.Time) *invocationState {
@@ -88,7 +102,7 @@ func newTracesPayload() (ptrace.Traces, ptrace.ScopeSpans) {
 	return traces, ss
 }
 
-func (s *invocationState) addTarget(label, ruleKind string) {
+func (s *invocationState) addTarget(label, ruleKind, configID string) {
 	if s.flushed {
 		return
 	}
@@ -104,6 +118,11 @@ func (s *invocationState) addTarget(label, ruleKind string) {
 	if ruleKind != "" {
 		span.Attributes().PutStr("bazel.target.rule_kind", ruleKind)
 	}
+
+	// Stamp configuration attributes if we already have the Configuration
+	// payload for this target's config id. No back-patching if it arrives
+	// later — Bazel emits Configuration before TargetConfigured in practice.
+	s.stampTargetConfig(span, configID)
 
 	// Store the span handle so later TargetComplete / TestSummary events can
 	// mutate attributes on the existing target span.
@@ -254,6 +273,19 @@ func (s *invocationState) writeRootSpan(finished *bep.BuildFinished) {
 		span.Attributes().PutStr("bazel.workspace_directory", s.started.GetWorkspaceDirectory())
 	}
 
+	if s.toolTag != "" {
+		span.Attributes().PutStr("bazel.tool_tag", s.toolTag)
+	}
+	if s.startupCount > 0 {
+		span.Attributes().PutInt("bazel.options.startup_count", s.startupCount)
+	}
+	if s.commandCount > 0 {
+		span.Attributes().PutInt("bazel.options.command_count", s.commandCount)
+	}
+	if s.commandLine != "" {
+		span.Attributes().PutStr("bazel.command_line", s.commandLine)
+	}
+
 	s.applyContextAttributes(span)
 
 	if finished != nil {
@@ -402,6 +434,29 @@ func (s *invocationState) summarizeTarget(label string, ts *bep.TestSummary) {
 	}
 }
 
+// storeConfiguration buffers a Configuration payload keyed by its config id.
+// Later invocations of addTarget look the payload up to stamp config attrs.
+func (s *invocationState) storeConfiguration(configID string, cfg *bep.Configuration) {
+	if s.flushed || configID == "" || configID == nullConfigID {
+		return
+	}
+	if s.configurations == nil {
+		s.configurations = make(map[string]*bep.Configuration)
+	}
+	s.configurations[configID] = cfg
+}
+
+// setOptionsParsed captures tool_tag plus startup / command option counts for
+// emission on the root span during finalize.
+func (s *invocationState) setOptionsParsed(op *bep.OptionsParsed) {
+	if s.flushed {
+		return
+	}
+	s.toolTag = op.GetToolTag()
+	s.startupCount = int64(len(op.GetExplicitStartupOptions()))
+	s.commandCount = int64(len(op.GetExplicitCmdLine()))
+}
+
 // applyContextAttributes writes buffered WorkspaceStatus + BuildMetadata
 // entries onto the root span. Keys are emitted in sorted order for
 // deterministic attribute listings across backends.
@@ -426,6 +481,32 @@ func (s *invocationState) applyContextAttributes(span ptrace.Span) {
 			span.Attributes().PutStr("bazel.metadata."+k, s.buildMetadata[k])
 		}
 	}
+}
+
+// nullConfigID is Bazel's sentinel for the null configuration — a TargetCompletedId
+// carrying this id has no associated Configuration payload.
+const nullConfigID = "none"
+
+// stampTargetConfig writes bazel.target.config.* attrs from the buffered
+// Configuration (if any) for the given config id.
+func (s *invocationState) stampTargetConfig(span ptrace.Span, configID string) {
+	if configID == "" || configID == nullConfigID {
+		return
+	}
+	cfg, ok := s.configurations[configID]
+	if !ok {
+		return
+	}
+	if m := cfg.GetMnemonic(); m != "" {
+		span.Attributes().PutStr("bazel.target.config.mnemonic", m)
+	}
+	if p := cfg.GetPlatformName(); p != "" {
+		span.Attributes().PutStr("bazel.target.config.platform", p)
+	}
+	if c := cfg.GetCpu(); c != "" {
+		span.Attributes().PutStr("bazel.target.config.cpu", c)
+	}
+	span.Attributes().PutBool("bazel.target.config.is_tool", cfg.GetIsTool())
 }
 
 // buildMetricsSpan creates a standalone Traces payload for BuildMetrics.
