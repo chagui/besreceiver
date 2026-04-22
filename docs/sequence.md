@@ -3,6 +3,7 @@
 ## BEP Stream Processing (single invocation)
 
 ```mermaid
+%%{init: {'theme':'neutral','themeVariables':{'noteBkgColor':'#3b4252','noteTextColor':'#eceff4','noteBorderColor':'#81a1c1','actorBkg':'#d8dee9','actorBorder':'#4c566a','actorTextColor':'#2e3440','actorLineColor':'#4c566a','signalColor':'#2e3440','signalTextColor':'#2e3440','labelBoxBkgColor':'#5e81ac','labelBoxBorderColor':'#4c566a','labelTextColor':'#eceff4','loopTextColor':'#2e3440','sequenceNumberColor':'#eceff4'}}}%%
 sequenceDiagram
     participant Bazel
     participant gRPC as besreceiver<br/>(gRPC server)
@@ -59,6 +60,7 @@ sequenceDiagram
 ## Concurrent Invocations
 
 ```mermaid
+%%{init: {'theme':'neutral','themeVariables':{'noteBkgColor':'#3b4252','noteTextColor':'#eceff4','noteBorderColor':'#81a1c1','actorBkg':'#d8dee9','actorBorder':'#4c566a','actorTextColor':'#2e3440','actorLineColor':'#4c566a','signalColor':'#2e3440','signalTextColor':'#2e3440','labelBoxBkgColor':'#5e81ac','labelBoxBorderColor':'#4c566a','labelTextColor':'#eceff4','loopTextColor':'#2e3440','sequenceNumberColor':'#eceff4'}}}%%
 sequenceDiagram
     participant B1 as Bazel Build 1
     participant B2 as Bazel Build 2
@@ -100,6 +102,7 @@ sequenceDiagram
 ## Collector Startup Lifecycle
 
 ```mermaid
+%%{init: {'theme':'neutral','themeVariables':{'noteBkgColor':'#3b4252','noteTextColor':'#eceff4','noteBorderColor':'#81a1c1','actorBkg':'#d8dee9','actorBorder':'#4c566a','actorTextColor':'#2e3440','actorLineColor':'#4c566a','signalColor':'#2e3440','signalTextColor':'#2e3440','labelBoxBkgColor':'#5e81ac','labelBoxBorderColor':'#4c566a','labelTextColor':'#eceff4','loopTextColor':'#2e3440','sequenceNumberColor':'#eceff4'}}}%%
 sequenceDiagram
     participant Main as otelcol-bazel main()
     participant Svc as Collector Service
