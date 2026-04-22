@@ -1,0 +1,144 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="720" viewBox="0 0 1100 720">
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+    .fill-bazel    { fill: #dbeafe; stroke: #3b82f6; }
+    .fill-bazel2   { fill: #fce7f3; stroke: #db2777; }
+    .fill-recv     { fill: #d1fae5; stroke: #059669; }
+    .fill-invoc    { fill: #fff7ed; stroke: #ea580c; }
+    .fill-consumer { fill: #e0f2fe; stroke: #0284c7; }
+    .label-main  { font-size: 13px; font-weight: 600; fill: #1a1a2e; }
+    .label-sub   { font-size: 11px; fill: #475569; }
+    .label-mono  { font-size: 11px; font-family: "SF Mono", "Fira Code", monospace; fill: #374151; }
+    .label-arrow { font-size: 11px; font-family: "SF Mono", "Fira Code", monospace; fill: #374151; }
+    .label-dim   { font-size: 10px; fill: #94a3b8; }
+    .lifeline { stroke: #cbd5e1; stroke-width: 1.2; stroke-dasharray: 4 3; fill: none; }
+    .arrow { stroke-width: 1.5; fill: none; }
+    .arrow-blue   { stroke: #3b82f6; }
+    .arrow-pink   { stroke: #db2777; }
+    .arrow-green  { stroke: #059669; }
+    .arrow-orange { stroke: #ea580c; }
+    .arrow-sky    { stroke: #0284c7; }
+    .arrow-dashed { stroke-dasharray: 5 3; }
+    .stage-label { font-size: 10px; font-weight: 700; fill: #94a3b8; letter-spacing: 0.5px; }
+    .note-rect { fill: #fef9c3; stroke: #ca8a04; stroke-width: 1.2; }
+  </style>
+  <defs>
+    <marker id="mh-blue"   markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#3b82f6"/></marker>
+    <marker id="mh-pink"   markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#db2777"/></marker>
+    <marker id="mh-green"  markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#059669"/></marker>
+    <marker id="mh-orange" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#ea580c"/></marker>
+    <marker id="mh-sky"    markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#0284c7"/></marker>
+  </defs>
+
+  <rect width="100%" height="100%" fill="#ffffff"/>
+
+  <!-- Actor headers -->
+  <rect x="30"  y="20" width="160" height="48" rx="8" class="fill-bazel"/>
+  <text x="110" y="42" text-anchor="middle" class="label-main">Bazel Build 1</text>
+  <text x="110" y="58" text-anchor="middle" class="label-mono">uuid=aaa</text>
+
+  <rect x="240" y="20" width="160" height="48" rx="8" class="fill-bazel2"/>
+  <text x="320" y="42" text-anchor="middle" class="label-main">Bazel Build 2</text>
+  <text x="320" y="58" text-anchor="middle" class="label-mono">uuid=bbb</text>
+
+  <rect x="470" y="20" width="170" height="48" rx="8" class="fill-recv"/>
+  <text x="555" y="42" text-anchor="middle" class="label-main">besreceiver</text>
+  <text x="555" y="58" text-anchor="middle" class="label-sub">gRPC server</text>
+
+  <rect x="700" y="20" width="170" height="48" rx="8" class="fill-invoc"/>
+  <text x="785" y="42" text-anchor="middle" class="label-main">invocations</text>
+  <text x="785" y="58" text-anchor="middle" class="label-mono">sync.Map</text>
+
+  <rect x="920" y="20" width="160" height="48" rx="8" class="fill-consumer"/>
+  <text x="1000" y="42" text-anchor="middle" class="label-main">consumer.Traces</text>
+  <text x="1000" y="58" text-anchor="middle" class="label-sub">Collector API</text>
+
+  <!-- Lifelines -->
+  <line x1="110"  y1="68" x2="110"  y2="700" class="lifeline"/>
+  <line x1="320"  y1="68" x2="320"  y2="700" class="lifeline"/>
+  <line x1="555"  y1="68" x2="555"  y2="700" class="lifeline"/>
+  <line x1="785"  y1="68" x2="785"  y2="700" class="lifeline"/>
+  <line x1="1000" y1="68" x2="1000" y2="700" class="lifeline"/>
+
+  <!-- Phase 1: B1 starts -->
+  <text x="30" y="96" class="stage-label">STREAM 1  ·  BuildStarted</text>
+  <line x1="110" y1="110" x2="555" y2="110" class="arrow arrow-blue" marker-end="url(#mh-blue)"/>
+  <text x="333" y="104" text-anchor="middle" class="label-arrow">BuildStarted  uuid=aaa</text>
+
+  <line x1="555" y1="134" x2="785" y2="134" class="arrow arrow-orange" marker-end="url(#mh-orange)"/>
+  <text x="670" y="128" text-anchor="middle" class="label-arrow">Store("aaa", invocationState{traceID=...})</text>
+
+  <line x1="555" y1="158" x2="110" y2="158" class="arrow arrow-blue arrow-dashed" marker-end="url(#mh-blue)"/>
+  <text x="333" y="152" text-anchor="middle" class="label-arrow">ACK</text>
+
+  <!-- Phase 2: B2 starts -->
+  <text x="30" y="188" class="stage-label">STREAM 2  ·  BuildStarted</text>
+  <line x1="320" y1="202" x2="555" y2="202" class="arrow arrow-pink" marker-end="url(#mh-pink)"/>
+  <text x="438" y="196" text-anchor="middle" class="label-arrow">BuildStarted  uuid=bbb</text>
+
+  <line x1="555" y1="226" x2="785" y2="226" class="arrow arrow-orange" marker-end="url(#mh-orange)"/>
+  <text x="670" y="220" text-anchor="middle" class="label-arrow">Store("bbb", invocationState{traceID=...})</text>
+
+  <line x1="555" y1="250" x2="320" y2="250" class="arrow arrow-pink arrow-dashed" marker-end="url(#mh-pink)"/>
+  <text x="438" y="244" text-anchor="middle" class="label-arrow">ACK</text>
+
+  <!-- par block -->
+  <rect x="20" y="280" width="1070" height="260" rx="8" fill="none" stroke="#ca8a04" stroke-width="1.5" stroke-dasharray="6 3"/>
+  <rect x="20" y="280" width="130" height="22" rx="0" fill="#fef9c3" stroke="#ca8a04" stroke-width="1.5"/>
+  <text x="30" y="296" class="stage-label" fill="#854d0e">par  CONCURRENT</text>
+
+  <!-- Divider inside par -->
+  <line x1="20" y1="410" x2="1090" y2="410" stroke="#ca8a04" stroke-width="1" stroke-dasharray="4 3"/>
+  <text x="30" y="424" class="stage-label" fill="#854d0e">and</text>
+
+  <!-- Top half: B1 action -->
+  <line x1="110" y1="320" x2="555" y2="320" class="arrow arrow-blue" marker-end="url(#mh-blue)"/>
+  <text x="333" y="314" text-anchor="middle" class="label-arrow">Stream 1: ActionExecuted</text>
+
+  <line x1="555" y1="344" x2="785" y2="344" class="arrow arrow-orange" marker-end="url(#mh-orange)"/>
+  <text x="670" y="338" text-anchor="middle" class="label-arrow">Load("aaa")</text>
+
+  <rect x="450" y="352" width="230" height="20" rx="4" class="note-rect"/>
+  <text x="565" y="366" text-anchor="middle" class="label-mono">Build span with traceID from aaa</text>
+
+  <line x1="555" y1="384" x2="1000" y2="384" class="arrow arrow-sky" marker-end="url(#mh-sky)"/>
+  <text x="778" y="378" text-anchor="middle" class="label-arrow">ConsumeTraces()</text>
+
+  <line x1="555" y1="402" x2="110" y2="402" class="arrow arrow-blue arrow-dashed" marker-end="url(#mh-blue)"/>
+  <text x="333" y="396" text-anchor="middle" class="label-arrow">ACK</text>
+
+  <!-- Bottom half: B2 action -->
+  <line x1="320" y1="446" x2="555" y2="446" class="arrow arrow-pink" marker-end="url(#mh-pink)"/>
+  <text x="438" y="440" text-anchor="middle" class="label-arrow">Stream 2: ActionExecuted</text>
+
+  <line x1="555" y1="470" x2="785" y2="470" class="arrow arrow-orange" marker-end="url(#mh-orange)"/>
+  <text x="670" y="464" text-anchor="middle" class="label-arrow">Load("bbb")</text>
+
+  <rect x="450" y="478" width="230" height="20" rx="4" class="note-rect"/>
+  <text x="565" y="492" text-anchor="middle" class="label-mono">Build span with traceID from bbb</text>
+
+  <line x1="555" y1="510" x2="1000" y2="510" class="arrow arrow-sky" marker-end="url(#mh-sky)"/>
+  <text x="778" y="504" text-anchor="middle" class="label-arrow">ConsumeTraces()</text>
+
+  <line x1="555" y1="528" x2="320" y2="528" class="arrow arrow-pink arrow-dashed" marker-end="url(#mh-pink)"/>
+  <text x="438" y="522" text-anchor="middle" class="label-arrow">ACK</text>
+
+  <!-- Phase: B1 finish -->
+  <text x="30" y="568" class="stage-label">STREAM 1  ·  BuildFinished</text>
+  <line x1="110" y1="582" x2="555" y2="582" class="arrow arrow-blue" marker-end="url(#mh-blue)"/>
+  <text x="333" y="576" text-anchor="middle" class="label-arrow">BuildFinished</text>
+
+  <line x1="555" y1="606" x2="785" y2="606" class="arrow arrow-orange" marker-end="url(#mh-orange)"/>
+  <text x="670" y="600" text-anchor="middle" class="label-arrow">Delete("aaa")</text>
+
+  <line x1="555" y1="630" x2="110" y2="630" class="arrow arrow-blue arrow-dashed" marker-end="url(#mh-blue)"/>
+  <text x="333" y="624" text-anchor="middle" class="label-arrow">ACK</text>
+
+  <!-- Phase: B2 finish -->
+  <text x="30" y="658" class="stage-label">STREAM 2  ·  BuildFinished</text>
+  <line x1="320" y1="672" x2="555" y2="672" class="arrow arrow-pink" marker-end="url(#mh-pink)"/>
+  <text x="438" y="666" text-anchor="middle" class="label-arrow">BuildFinished</text>
+
+  <line x1="555" y1="692" x2="320" y2="692" class="arrow arrow-pink arrow-dashed" marker-end="url(#mh-pink)"/>
+  <text x="438" y="686" text-anchor="middle" class="label-arrow">ACK  (Delete "bbb")</text>
+</svg>
