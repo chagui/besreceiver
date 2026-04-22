@@ -1,0 +1,176 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="990" viewBox="0 0 1200 990">
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+    .fill-bazel    { fill: #dbeafe; stroke: #3b82f6; }
+    .fill-grpc     { fill: #ede9fe; stroke: #7c3aed; }
+    .fill-recv     { fill: #d1fae5; stroke: #059669; }
+    .fill-owner    { fill: #fef9c3; stroke: #ca8a04; }
+    .fill-consumer { fill: #e0f2fe; stroke: #0284c7; }
+    .fill-backend  { fill: #f1f5f9; stroke: #64748b; }
+    .label-main  { font-size: 13px; font-weight: 600; fill: #1a1a2e; }
+    .label-sub   { font-size: 11px; fill: #475569; }
+    .label-mono  { font-size: 11px; font-family: "SF Mono", "Fira Code", monospace; fill: #374151; }
+    .label-arrow { font-size: 11px; font-family: "SF Mono", "Fira Code", monospace; fill: #374151; }
+    .label-dim   { font-size: 10px; fill: #94a3b8; }
+    .lifeline { stroke: #cbd5e1; stroke-width: 1.2; stroke-dasharray: 4 3; fill: none; }
+    .arrow { stroke-width: 1.5; fill: none; }
+    .arrow-solid-blue   { stroke: #3b82f6; }
+    .arrow-solid-purple { stroke: #7c3aed; }
+    .arrow-solid-green  { stroke: #059669; }
+    .arrow-solid-yellow { stroke: #ca8a04; }
+    .arrow-solid-sky    { stroke: #0284c7; }
+    .arrow-solid-slate  { stroke: #64748b; }
+    .arrow-dashed { stroke-dasharray: 5 3; }
+    .stage-label { font-size: 10px; font-weight: 700; fill: #94a3b8; letter-spacing: 0.5px; }
+    .note-rect { fill: #fef9c3; stroke: #ca8a04; stroke-width: 1.2; }
+    .phase-rect { fill: #f8fafc; stroke: #e2e8f0; stroke-width: 1; stroke-dasharray: 4 3; }
+  </style>
+  <defs>
+    <marker id="mh-blue"   markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#3b82f6"/></marker>
+    <marker id="mh-purple" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#7c3aed"/></marker>
+    <marker id="mh-green"  markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#059669"/></marker>
+    <marker id="mh-yellow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#ca8a04"/></marker>
+    <marker id="mh-sky"    markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#0284c7"/></marker>
+    <marker id="mh-slate"  markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#64748b"/></marker>
+  </defs>
+
+  <rect width="100%" height="100%" fill="#ffffff"/>
+
+  <!-- Actor headers -->
+  <rect x="30"   y="20" width="150" height="48" rx="8" class="fill-bazel"/>
+  <text x="105"  y="42" text-anchor="middle" class="label-main">Bazel</text>
+  <text x="105"  y="58" text-anchor="middle" class="label-mono">--bes_backend</text>
+
+  <rect x="220"  y="20" width="160" height="48" rx="8" class="fill-grpc"/>
+  <text x="300"  y="42" text-anchor="middle" class="label-main">besreceiver</text>
+  <text x="300"  y="58" text-anchor="middle" class="label-sub">gRPC server</text>
+
+  <rect x="420"  y="20" width="150" height="48" rx="8" class="fill-recv"/>
+  <text x="495"  y="42" text-anchor="middle" class="label-main">BEP Parser</text>
+  <text x="495"  y="58" text-anchor="middle" class="label-mono">bepparser.go</text>
+
+  <rect x="610"  y="20" width="170" height="48" rx="8" class="fill-owner"/>
+  <text x="695"  y="42" text-anchor="middle" class="label-main">Trace Builder</text>
+  <text x="695"  y="58" text-anchor="middle" class="label-mono">tracebuilder.go</text>
+
+  <rect x="820"  y="20" width="150" height="48" rx="8" class="fill-consumer"/>
+  <text x="895"  y="42" text-anchor="middle" class="label-main">consumer.Traces</text>
+  <text x="895"  y="58" text-anchor="middle" class="label-sub">Collector API</text>
+
+  <rect x="1010" y="20" width="160" height="48" rx="8" class="fill-backend"/>
+  <text x="1090" y="42" text-anchor="middle" class="label-main">Pipeline</text>
+  <text x="1090" y="58" text-anchor="middle" class="label-sub">batch → export</text>
+
+  <!-- Lifelines -->
+  <line x1="105"  y1="68" x2="105"  y2="975" class="lifeline"/>
+  <line x1="300"  y1="68" x2="300"  y2="975" class="lifeline"/>
+  <line x1="495"  y1="68" x2="495"  y2="975" class="lifeline"/>
+  <line x1="695"  y1="68" x2="695"  y2="975" class="lifeline"/>
+  <line x1="895"  y1="68" x2="895"  y2="975" class="lifeline"/>
+  <line x1="1090" y1="68" x2="1090" y2="975" class="lifeline"/>
+
+  <!-- Stream open -->
+  <line x1="105" y1="100" x2="300" y2="100" class="arrow arrow-solid-blue" marker-end="url(#mh-blue)"/>
+  <text x="202" y="92" text-anchor="middle" class="label-arrow">PublishBuildToolEventStream  (open bidirectional stream)</text>
+
+  <!-- Phase 1: BuildStarted -->
+  <rect x="18" y="120" width="1170" height="130" rx="8" class="phase-rect"/>
+  <text x="30" y="138" class="stage-label">EVENT 1  ·  BuildStarted</text>
+
+  <line x1="105" y1="158" x2="300" y2="158" class="arrow arrow-solid-blue" marker-end="url(#mh-blue)"/>
+  <text x="202" y="152" text-anchor="middle" class="label-arrow">OrderedBuildEvent  seq=1  bazel_event=Any</text>
+
+  <line x1="300" y1="182" x2="495" y2="182" class="arrow arrow-solid-purple" marker-end="url(#mh-purple)"/>
+  <text x="397" y="176" text-anchor="middle" class="label-arrow">ParseBazelEvent(Any)</text>
+
+  <line x1="495" y1="204" x2="300" y2="204" class="arrow arrow-solid-purple arrow-dashed" marker-end="url(#mh-purple)"/>
+  <text x="397" y="198" text-anchor="middle" class="label-arrow">BuildEvent{BuildStarted}</text>
+
+  <line x1="300" y1="226" x2="695" y2="226" class="arrow arrow-solid-yellow" marker-end="url(#mh-yellow)"/>
+  <text x="497" y="220" text-anchor="middle" class="label-arrow">ProcessEvent(BuildStarted)</text>
+
+  <!-- Note over Builder: create invocation state -->
+  <rect x="612" y="240" width="300" height="58" rx="4" class="note-rect"/>
+  <text x="762" y="257" text-anchor="middle" class="label-sub" font-weight="700">Create invocationState</text>
+  <text x="762" y="272" text-anchor="middle" class="label-mono">traceID = SHA256(uuid)</text>
+  <text x="762" y="286" text-anchor="middle" class="label-mono">new root span  "bazel.build"  + start_time</text>
+
+  <!-- ACK seq=1 -->
+  <line x1="300" y1="330" x2="105" y2="330" class="arrow arrow-solid-blue arrow-dashed" marker-end="url(#mh-blue)"/>
+  <text x="202" y="324" text-anchor="middle" class="label-arrow">ACK  seq=1</text>
+
+  <!-- Phase 2: TargetConfigured -->
+  <rect x="18" y="350" width="1170" height="118" rx="8" class="phase-rect"/>
+  <text x="30" y="368" class="stage-label">EVENT 2  ·  TargetConfigured</text>
+
+  <line x1="105" y1="388" x2="300" y2="388" class="arrow arrow-solid-blue" marker-end="url(#mh-blue)"/>
+  <text x="202" y="382" text-anchor="middle" class="label-arrow">OrderedBuildEvent  seq=2</text>
+
+  <line x1="300" y1="410" x2="695" y2="410" class="arrow arrow-solid-yellow" marker-end="url(#mh-yellow)"/>
+  <text x="497" y="404" text-anchor="middle" class="label-arrow">ParseBazelEvent  →  ProcessEvent(TargetConfigured)</text>
+
+  <rect x="612" y="420" width="280" height="42" rx="4" class="note-rect"/>
+  <text x="752" y="437" text-anchor="middle" class="label-sub" font-weight="700">Create "bazel.target" span</text>
+  <text x="752" y="451" text-anchor="middle" class="label-mono">targets[(label, config)] = spanID</text>
+
+  <line x1="300" y1="458" x2="105" y2="458" class="arrow arrow-solid-blue arrow-dashed" marker-end="url(#mh-blue)"/>
+  <text x="202" y="452" text-anchor="middle" class="label-arrow">ACK  seq=2</text>
+
+  <!-- Phase 3: ActionExecuted -->
+  <rect x="18" y="486" width="1170" height="210" rx="8" class="phase-rect"/>
+  <text x="30" y="504" class="stage-label">EVENT 3  ·  ActionExecuted</text>
+
+  <line x1="105" y1="524" x2="300" y2="524" class="arrow arrow-solid-blue" marker-end="url(#mh-blue)"/>
+  <text x="202" y="518" text-anchor="middle" class="label-arrow">OrderedBuildEvent  seq=3</text>
+
+  <line x1="300" y1="548" x2="695" y2="548" class="arrow arrow-solid-yellow" marker-end="url(#mh-yellow)"/>
+  <text x="497" y="542" text-anchor="middle" class="label-arrow">ParseBazelEvent  →  ProcessEvent(ActionExecuted)</text>
+
+  <rect x="612" y="558" width="300" height="68" rx="4" class="note-rect"/>
+  <text x="762" y="575" text-anchor="middle" class="label-sub" font-weight="700">Create "bazel.action" span</text>
+  <text x="762" y="590" text-anchor="middle" class="label-mono">parent = targets[(label, config)]</text>
+  <text x="762" y="604" text-anchor="middle" class="label-mono">start_time · end_time · mnemonic · exit_code</text>
+
+  <line x1="695" y1="646" x2="895" y2="646" class="arrow arrow-solid-sky" marker-end="url(#mh-sky)"/>
+  <text x="795" y="640" text-anchor="middle" class="label-arrow">ConsumeTraces(ptrace.Traces)</text>
+
+  <line x1="895" y1="668" x2="1090" y2="668" class="arrow arrow-solid-slate" marker-end="url(#mh-slate)"/>
+  <text x="992" y="662" text-anchor="middle" class="label-arrow">batch → export</text>
+
+  <line x1="300" y1="690" x2="105" y2="690" class="arrow arrow-solid-blue arrow-dashed" marker-end="url(#mh-blue)"/>
+  <text x="202" y="684" text-anchor="middle" class="label-arrow">ACK  seq=3</text>
+
+  <!-- Ellipsis separator -->
+  <line x1="60" y1="718" x2="1160" y2="718" stroke="#e2e8f0" stroke-width="1" stroke-dasharray="2 4"/>
+  <text x="600" y="734" text-anchor="middle" class="label-dim" font-style="italic">... further ActionExecuted / TestResult events stream and get processed the same way ...</text>
+
+  <!-- Phase N: BuildFinished -->
+  <rect x="18" y="752" width="1170" height="164" rx="8" class="phase-rect"/>
+  <text x="30" y="770" class="stage-label">EVENT N  ·  BuildFinished</text>
+
+  <line x1="105" y1="790" x2="300" y2="790" class="arrow arrow-solid-blue" marker-end="url(#mh-blue)"/>
+  <text x="202" y="784" text-anchor="middle" class="label-arrow">OrderedBuildEvent  seq=N</text>
+
+  <line x1="300" y1="812" x2="695" y2="812" class="arrow arrow-solid-yellow" marker-end="url(#mh-yellow)"/>
+  <text x="497" y="806" text-anchor="middle" class="label-arrow">ParseBazelEvent  →  ProcessEvent(BuildFinished)</text>
+
+  <rect x="612" y="822" width="280" height="42" rx="4" class="note-rect"/>
+  <text x="752" y="839" text-anchor="middle" class="label-sub" font-weight="700">Close root span</text>
+  <text x="752" y="853" text-anchor="middle" class="label-mono">finish_time · exit_code</text>
+
+  <line x1="695" y1="880" x2="895" y2="880" class="arrow arrow-solid-sky" marker-end="url(#mh-sky)"/>
+  <text x="795" y="874" text-anchor="middle" class="label-arrow">ConsumeTraces(remaining spans)</text>
+
+  <line x1="895" y1="900" x2="1090" y2="900" class="arrow arrow-solid-slate" marker-end="url(#mh-slate)"/>
+  <text x="992" y="894" text-anchor="middle" class="label-arrow">batch → export</text>
+
+  <line x1="300" y1="912" x2="105" y2="912" class="arrow arrow-solid-blue arrow-dashed" marker-end="url(#mh-blue)"/>
+  <text x="202" y="906" text-anchor="middle" class="label-arrow">ACK  seq=N</text>
+
+  <!-- Stream close -->
+  <line x1="105" y1="940" x2="300" y2="940" class="arrow arrow-solid-blue" marker-end="url(#mh-blue)"/>
+  <text x="202" y="934" text-anchor="middle" class="label-arrow">stream EOF</text>
+
+  <rect x="242" y="951" width="280" height="20" rx="4" class="note-rect"/>
+  <text x="382" y="965" text-anchor="middle" class="label-mono">Clean up invocationState</text>
+</svg>
