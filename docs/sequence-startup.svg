@@ -54,6 +54,11 @@
   <text x="1055" y="42" text-anchor="middle" class="label-main">gRPC Server</text>
   <text x="1055" y="58" text-anchor="middle" class="label-sub">google.golang.org/grpc</text>
 
+  <!-- Phase bands (rendered before lifelines so the dashed lifelines read across them) -->
+  <rect x="18" y="86"  width="1130" height="256" rx="8" class="phase-rect"/>
+  <rect x="18" y="360" width="1130" height="80"  rx="8" class="phase-rect"/>
+  <rect x="18" y="458" width="1130" height="138" rx="8" class="phase-rect"/>
+
   <!-- Lifelines -->
   <line x1="115"  y1="68" x2="115"  y2="600" class="lifeline"/>
   <line x1="340"  y1="68" x2="340"  y2="600" class="lifeline"/>
@@ -62,7 +67,6 @@
   <line x1="1055" y1="68" x2="1055" y2="600" class="lifeline"/>
 
   <!-- Phase: Startup -->
-  <rect x="18" y="86" width="1130" height="256" rx="8" class="phase-rect"/>
   <text x="30" y="104" class="stage-label">STARTUP</text>
 
   <!-- main → Service: Run -->
@@ -102,7 +106,6 @@
   <text x="582" y="318" text-anchor="middle" class="label-arrow">nil  (started)</text>
 
   <!-- Running phase separator -->
-  <rect x="18" y="360" width="1130" height="80" rx="8" class="phase-rect"/>
   <text x="30" y="378" class="stage-label">RUNNING</text>
 
   <rect x="260" y="390" width="640" height="38" rx="6" class="note-rect"/>
@@ -110,7 +113,6 @@
   <text x="580" y="422" text-anchor="middle" class="label-mono">gRPC server handles PublishBuildToolEventStream concurrently</text>
 
   <!-- Shutdown phase -->
-  <rect x="18" y="458" width="1130" height="138" rx="8" class="phase-rect"/>
   <text x="30" y="476" class="stage-label">SHUTDOWN</text>
 
   <!-- Service → Receiver: Shutdown -->

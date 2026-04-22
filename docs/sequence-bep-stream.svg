@@ -61,6 +61,12 @@
   <text x="1090" y="42" text-anchor="middle" class="label-main">Pipeline</text>
   <text x="1090" y="58" text-anchor="middle" class="label-sub">batch → export</text>
 
+  <!-- Phase bands (rendered before lifelines so the dashed lifelines read across them) -->
+  <rect x="18" y="120" width="1170" height="130" rx="8" class="phase-rect"/>
+  <rect x="18" y="350" width="1170" height="118" rx="8" class="phase-rect"/>
+  <rect x="18" y="486" width="1170" height="210" rx="8" class="phase-rect"/>
+  <rect x="18" y="752" width="1170" height="164" rx="8" class="phase-rect"/>
+
   <!-- Lifelines -->
   <line x1="105"  y1="68" x2="105"  y2="975" class="lifeline"/>
   <line x1="300"  y1="68" x2="300"  y2="975" class="lifeline"/>
@@ -74,7 +80,6 @@
   <text x="202" y="92" text-anchor="middle" class="label-arrow">PublishBuildToolEventStream  (open bidirectional stream)</text>
 
   <!-- Phase 1: BuildStarted -->
-  <rect x="18" y="120" width="1170" height="130" rx="8" class="phase-rect"/>
   <text x="30" y="138" class="stage-label">EVENT 1  ·  BuildStarted</text>
 
   <line x1="105" y1="158" x2="300" y2="158" class="arrow arrow-solid-blue" marker-end="url(#mh-blue)"/>
@@ -100,7 +105,6 @@
   <text x="202" y="324" text-anchor="middle" class="label-arrow">ACK  seq=1</text>
 
   <!-- Phase 2: TargetConfigured -->
-  <rect x="18" y="350" width="1170" height="118" rx="8" class="phase-rect"/>
   <text x="30" y="368" class="stage-label">EVENT 2  ·  TargetConfigured</text>
 
   <line x1="105" y1="388" x2="300" y2="388" class="arrow arrow-solid-blue" marker-end="url(#mh-blue)"/>
@@ -117,7 +121,6 @@
   <text x="202" y="452" text-anchor="middle" class="label-arrow">ACK  seq=2</text>
 
   <!-- Phase 3: ActionExecuted -->
-  <rect x="18" y="486" width="1170" height="210" rx="8" class="phase-rect"/>
   <text x="30" y="504" class="stage-label">EVENT 3  ·  ActionExecuted</text>
 
   <line x1="105" y1="524" x2="300" y2="524" class="arrow arrow-solid-blue" marker-end="url(#mh-blue)"/>
@@ -145,7 +148,6 @@
   <text x="600" y="734" text-anchor="middle" class="label-dim" font-style="italic">... further ActionExecuted / TestResult events stream and get processed the same way ...</text>
 
   <!-- Phase N: BuildFinished -->
-  <rect x="18" y="752" width="1170" height="164" rx="8" class="phase-rect"/>
   <text x="30" y="770" class="stage-label">EVENT N  ·  BuildFinished</text>
 
   <line x1="105" y1="790" x2="300" y2="790" class="arrow arrow-solid-blue" marker-end="url(#mh-blue)"/>
