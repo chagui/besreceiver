@@ -43,6 +43,11 @@ func createDefaultConfig() component.Config {
 		PII:                  PIIConfig{},
 		HighCardinalityCaps:  defaultHighCardinalityCaps(),
 		MaxActionDataEntries: defaultMaxActionDataEntries,
+		Filter: FilterConfig{
+			// Default preserves pre-filter behaviour: every span is emitted
+			// unless the operator opts into a stricter level or adds rules.
+			DefaultLevel: DetailLevelVerbose,
+		},
 	}
 }
 

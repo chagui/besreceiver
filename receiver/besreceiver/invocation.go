@@ -106,10 +106,18 @@ type invocationState struct {
 	// caps bounds the size of Slice[Map] attributes emitted on the
 	// bazel.metrics span for high-cardinality BuildMetrics sub-messages.
 	caps HighCardinalityCaps
+
+	// filter gates per-target span emission. Never nil — the TraceBuilder
+	// installs a pass-through filter when the operator has not configured
+	// one, so callers can dereference without a guard.
+	filter *Filter
 }
 
-func newInvocationState(traceID pcommon.TraceID, rootSpanID pcommon.SpanID, started *bep.BuildStarted, now time.Time, pii PIIConfig, caps HighCardinalityCaps) *invocationState {
+func newInvocationState(traceID pcommon.TraceID, rootSpanID pcommon.SpanID, started *bep.BuildStarted, now time.Time, pii PIIConfig, caps HighCardinalityCaps, filter *Filter) *invocationState {
 	traces, ss := newTracesPayload()
+	if filter == nil {
+		filter = NewFilter(FilterConfig{})
+	}
 	return &invocationState{
 		traceID:       traceID,
 		rootSpanID:    rootSpanID,
@@ -121,6 +129,7 @@ func newInvocationState(traceID pcommon.TraceID, rootSpanID pcommon.SpanID, star
 		scopeSpans:    ss,
 		pii:           pii,
 		caps:          caps,
+		filter:        filter,
 	}
 }
 
@@ -141,6 +150,13 @@ func newTracesPayload() (ptrace.Traces, ptrace.ScopeSpans) {
 // reparenting counter metric.
 func (s *invocationState) addTarget(label, ruleKind, configID string) int {
 	if s.flushed {
+		return 0
+	}
+	// Filter runs at event-processing time, not emission time: skipping here
+	// avoids any allocation for targets the operator has dropped. The root
+	// bazel.build and bazel.metrics spans bypass the filter entirely and
+	// are emitted elsewhere.
+	if !s.filter.LevelForTarget(label).allowTarget() {
 		return 0
 	}
 
@@ -178,8 +194,20 @@ func (s *invocationState) populateTargetSpan(span ptrace.Span, label, ruleKind, 
 	return spanID
 }
 
+// addAction appends a bazel.action span for the given ActionExecuted event.
+// Conditionals (PII gate, filter gate, orphan reparent, mnemonic name,
+// optional timestamps) live inline; splitting them into helpers would
+// fragment the per-span build across several stateful methods without any
+// real readability gain.
 func (s *invocationState) addAction(label, configID, primaryOutput string, action *bep.ActionExecuted) {
 	if s.flushed {
+		return
+	}
+	// Action-label filtering uses the owning target's label — actions are
+	// structural children. When label is empty the filter falls through to
+	// DefaultLevel, which is the only correct default (the action can't be
+	// attributed to any rule).
+	if !s.filter.LevelForTarget(label).allowAction() {
 		return
 	}
 
@@ -247,6 +275,12 @@ func (s *invocationState) populateActionSpan(span ptrace.Span, parentSpanID pcom
 
 func (s *invocationState) addTestResult(label, configID string, tr *bep.BuildEventId_TestResultId, result *bep.TestResult) {
 	if s.flushed {
+		return
+	}
+	// Tests share the action gate: allowAction()==true only at verbose.
+	// If the operator wants per-target summary without per-shard detail,
+	// DetailLevelTargets suppresses both.
+	if !s.filter.LevelForTarget(label).allowAction() {
 		return
 	}
 

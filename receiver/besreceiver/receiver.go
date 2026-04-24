@@ -46,6 +46,7 @@ func (r *besReceiver) Start(ctx context.Context, host component.Host) error {
 			PII:                  r.config.PII,
 			Caps:                 r.config.HighCardinalityCaps,
 			MaxActionDataEntries: r.config.MaxActionDataEntries,
+			Filter:               r.config.Filter,
 		})
 		r.traceBuilder.Start()
 

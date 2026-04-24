@@ -39,6 +39,11 @@ type Config struct {
 	// Bazel emits more entries than the cap, the first N (source order) are
 	// kept and a warning is logged with the invocation ID and original count.
 	MaxActionDataEntries int `mapstructure:"max_action_data_entries"`
+
+	// Filter configures per-target detail level filtering. When absent or
+	// empty, the receiver emits every span (pre-filter behaviour). See
+	// FilterConfig.
+	Filter FilterConfig `mapstructure:"filter"`
 }
 
 // HighCardinalityCaps configures per-attribute limits on the Slice[Map]
@@ -165,6 +170,9 @@ func (cfg *Config) Validate() error {
 	}
 	if cfg.MaxActionDataEntries < 0 {
 		return fmt.Errorf("max_action_data_entries must not be negative, got %d", cfg.MaxActionDataEntries)
+	}
+	if err := cfg.Filter.Validate(); err != nil {
+		return err
 	}
 	return nil
 }

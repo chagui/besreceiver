@@ -72,6 +72,8 @@ make fuzz       # Run fuzz tests
 
 - [Architecture](docs/architecture.md) -- system overview, internal components, and span hierarchy
 - [Sequence diagrams](docs/sequence.md) -- BEP stream processing flow
+- [Attributes](docs/attributes.md) -- span attributes and PII controls
+- [Filtering](docs/filter.md) -- per-target detail levels to control trace verbosity
 
 ## License
 

@@ -590,6 +590,7 @@ func TestReapStale(t *testing.T) {
 		time.Now().Add(-time.Hour),
 		PIIConfig{},
 		HighCardinalityCaps{},
+		nil,
 	)
 	span := state.appendSpan()
 	span.SetSpanID(spanIDFromIdentity("uuid-stale", "action", "//pkg:lib", "Javac", ""))
@@ -1587,6 +1588,7 @@ func TestTraceBuilder_Aborted_WithoutBuildFinished(t *testing.T) {
 		time.Now().Add(-time.Hour),
 		PIIConfig{},
 		HighCardinalityCaps{},
+		nil,
 	)
 	state.recordAbort(&bep.Aborted{Reason: bep.Aborted_TIME_OUT, Description: "deadline"})
 
