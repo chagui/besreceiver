@@ -25,7 +25,9 @@ import (
 //  1. Events before BuildStarted are dropped (no invocationState exists yet).
 //  2. ActionExecuted/TestResult arriving before their TargetConfigured are
 //     initially parented to the root span, then reparented under the correct
-//     target when TargetConfigured arrives (see recordOrphan / reparentOrphans).
+//     target when TargetConfigured arrives (see recordPendingReparent /
+//     drainPendingReparent). Orphans whose TargetConfigured never arrives
+//     remain parented to root at finalize time.
 //  3. Events after BuildFinished (except BuildMetrics) are silently discarded
 //     because finalize sets flushed=true, and addTarget/addAction/addTestResult
 //     all short-circuit on that flag.
@@ -43,10 +45,12 @@ type invocationState struct {
 	scopeSpans    ptrace.ScopeSpans // reference into pendingTraces for span appending
 	flushed       bool              // true after BuildFinished flushes the batch
 
-	// orphanedSpans tracks spans whose target hadn't arrived yet at insertion time.
-	// Keyed by label, each entry is a list of span indices (into scopeSpans.Spans())
-	// that should be reparented when addTarget is called for that label.
-	orphanedSpans map[string][]int
+	// pendingReparent tracks spans whose target hadn't arrived yet at
+	// insertion time. Keyed by label, each entry is a list of span handles
+	// to be reparented when addTarget is called for that label. pdata spans
+	// are reference types, so the stored handle can be mutated in place via
+	// SetParentSpanID after creation.
+	pendingReparent map[string][]ptrace.Span
 
 	// abortRecorded is set on the first Aborted event. Subsequent aborts are
 	// logged but do not overwrite the original reason / description, which are
@@ -106,9 +110,13 @@ func newTracesPayload() (ptrace.Traces, ptrace.ScopeSpans) {
 	return traces, ss
 }
 
-func (s *invocationState) addTarget(label, ruleKind, configID string) {
+// addTarget creates the bazel.target span for label and reparents any
+// previously-buffered action/test spans that arrived before this target.
+// Returns the number of spans reparented, so the caller can track a
+// reparenting counter metric.
+func (s *invocationState) addTarget(label, ruleKind, configID string) int {
 	if s.flushed {
-		return
+		return 0
 	}
 
 	spanID := spanIDFromIdentity(s.uuid, "target", label)
@@ -133,7 +141,7 @@ func (s *invocationState) addTarget(label, ruleKind, configID string) {
 	s.targets[targetKey(label, "")] = span
 
 	// Reparent any actions/tests that arrived before this target.
-	s.reparentOrphans(label, spanID)
+	return s.drainPendingReparent(label, spanID)
 }
 
 func (s *invocationState) addAction(label, configID, primaryOutput string, action *bep.ActionExecuted) {
@@ -143,14 +151,15 @@ func (s *invocationState) addAction(label, configID, primaryOutput string, actio
 
 	parentSpanID, resolved := s.resolveTargetSpan(label, configID)
 
-	spanIdx := s.scopeSpans.Spans().Len()
 	span := s.appendSpan()
 	span.SetSpanID(spanIDFromIdentity(s.uuid, "action", label, action.GetType(), primaryOutput))
 
-	// If the target hasn't been configured yet, record this span for
-	// deferred reparenting when addTarget is called.
+	// If the target hasn't been configured yet, buffer the span handle for
+	// deferred reparenting when addTarget is called for this label. pdata
+	// spans are reference types — the stored handle remains valid until the
+	// batch is flushed.
 	if !resolved && label != "" {
-		s.recordOrphan(label, spanIdx)
+		s.recordPendingReparent(label, span)
 	}
 	span.SetParentSpanID(parentSpanID)
 	if mnemonic := action.GetType(); mnemonic != "" {
@@ -201,7 +210,6 @@ func (s *invocationState) addTestResult(label, configID string, tr *bep.BuildEve
 
 	parentSpanID, resolved := s.resolveTargetSpan(label, configID)
 
-	spanIdx := s.scopeSpans.Spans().Len()
 	span := s.appendSpan()
 	span.SetSpanID(spanIDFromIdentity(s.uuid, "test", label,
 		strconv.Itoa(int(tr.GetRun())),
@@ -210,7 +218,7 @@ func (s *invocationState) addTestResult(label, configID string, tr *bep.BuildEve
 	))
 
 	if !resolved && label != "" {
-		s.recordOrphan(label, spanIdx)
+		s.recordPendingReparent(label, span)
 	}
 	span.SetParentSpanID(parentSpanID)
 	span.SetName("bazel.test")
@@ -251,7 +259,10 @@ func (s *invocationState) finalize(finished *bep.BuildFinished) (ptrace.Traces, 
 	s.writeRootSpan(finished)
 
 	s.flushed = true
-	s.orphanedSpans = nil
+	// Any entries left in pendingReparent represent actions/tests whose
+	// TargetConfigured never arrived. Their spans stay parented to root
+	// (explicit orphan), matching prior behavior.
+	s.pendingReparent = nil
 	return s.pendingTraces, true
 }
 
@@ -635,8 +646,9 @@ func (s *invocationState) flushOrphaned() (ptrace.Traces, bool) {
 // and falls back to the root span if no target has been registered yet.
 //
 // The bool return indicates whether the target was found. When false, the
-// caller records the span as an orphan so that addTarget can reparent it
-// when the TargetConfigured event arrives. See recordOrphan / reparentOrphans.
+// caller buffers the span for deferred reparenting so that addTarget can
+// reparent it when the TargetConfigured event arrives. See
+// recordPendingReparent / drainPendingReparent.
 func (s *invocationState) resolveTargetSpan(label, configID string) (pcommon.SpanID, bool) {
 	if span, ok := s.targets[targetKey(label, configID)]; ok {
 		return span.SpanID(), true
@@ -647,28 +659,29 @@ func (s *invocationState) resolveTargetSpan(label, configID string) (pcommon.Spa
 	return s.rootSpanID, false
 }
 
-// recordOrphan tracks a span index that needs reparenting when its target arrives.
-func (s *invocationState) recordOrphan(label string, spanIdx int) {
-	if s.orphanedSpans == nil {
-		s.orphanedSpans = make(map[string][]int)
+// recordPendingReparent buffers a span handle that needs its parent updated
+// when TargetConfigured arrives for label. pdata spans are reference types,
+// so the handle stored here remains mutable via SetParentSpanID.
+func (s *invocationState) recordPendingReparent(label string, span ptrace.Span) {
+	if s.pendingReparent == nil {
+		s.pendingReparent = make(map[string][]ptrace.Span)
 	}
-	s.orphanedSpans[label] = append(s.orphanedSpans[label], spanIdx)
+	s.pendingReparent[label] = append(s.pendingReparent[label], span)
 }
 
-// reparentOrphans updates any previously-orphaned spans for the given label
-// to be children of the target span.
-func (s *invocationState) reparentOrphans(label string, targetSpanID pcommon.SpanID) {
-	indices, ok := s.orphanedSpans[label]
+// drainPendingReparent retroactively points any buffered spans for label at
+// targetSpanID, then clears the entry. Returns the number of spans reparented
+// so the caller can increment a counter metric.
+func (s *invocationState) drainPendingReparent(label string, targetSpanID pcommon.SpanID) int {
+	spans, ok := s.pendingReparent[label]
 	if !ok {
-		return
+		return 0
 	}
-	spans := s.scopeSpans.Spans()
-	for _, idx := range indices {
-		if idx < spans.Len() {
-			spans.At(idx).SetParentSpanID(targetSpanID)
-		}
+	for _, span := range spans {
+		span.SetParentSpanID(targetSpanID)
 	}
-	delete(s.orphanedSpans, label)
+	delete(s.pendingReparent, label)
+	return len(spans)
 }
 
 // appendSpan appends a new span to the invocation's pending batch.
