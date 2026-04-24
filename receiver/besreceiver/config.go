@@ -31,6 +31,14 @@ type Config struct {
 	// fields fall back to defaults (see defaultHighCardinalityCaps). Exceeding
 	// a cap truncates the list and emits a Warn-level log.
 	HighCardinalityCaps HighCardinalityCaps `mapstructure:"high_cardinality_caps"`
+
+	// MaxActionDataEntries caps the number of per-mnemonic ActionData entries
+	// emitted on the bazel.metrics span attribute and as standalone gauges.
+	// Bazel already ranks the list by execution count (top-N at source); this
+	// cap is a cardinality guard for downstream backends. Default: 50. When
+	// Bazel emits more entries than the cap, the first N (source order) are
+	// kept and a warning is logged with the invocation ID and original count.
+	MaxActionDataEntries int `mapstructure:"max_action_data_entries"`
 }
 
 // HighCardinalityCaps configures per-attribute limits on the Slice[Map]
@@ -51,9 +59,6 @@ type HighCardinalityCaps struct {
 	GraphValues int `mapstructure:"graph_values"`
 }
 
-// defaultHighCardinalityCaps returns the documented default caps. Mirrored on
-// Config via createDefaultConfig so operator-supplied configs see the defaults
-// without having to opt in explicitly.
 // Default caps chosen for typical Bazel invocations; see HighCardinalityCaps
 // for rationale.
 const (
@@ -62,6 +67,9 @@ const (
 	defaultCapGraphValues = 50
 )
 
+// defaultHighCardinalityCaps returns the documented default caps. Mirrored on
+// Config via createDefaultConfig so operator-supplied configs see the defaults
+// without having to opt in explicitly.
 func defaultHighCardinalityCaps() HighCardinalityCaps {
 	return HighCardinalityCaps{
 		Garbage:     defaultCapGarbage,
@@ -154,6 +162,9 @@ func (cfg *Config) Validate() error {
 	}
 	if cfg.HighCardinalityCaps.GraphValues < 0 {
 		return fmt.Errorf("high_cardinality_caps.graph_values must not be negative, got %d", cfg.HighCardinalityCaps.GraphValues)
+	}
+	if cfg.MaxActionDataEntries < 0 {
+		return fmt.Errorf("max_action_data_entries must not be negative, got %d", cfg.MaxActionDataEntries)
 	}
 	return nil
 }

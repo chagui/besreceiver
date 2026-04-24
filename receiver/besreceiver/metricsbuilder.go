@@ -3,6 +3,7 @@ package besreceiver
 import (
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/pmetric"
+	"go.uber.org/zap"
 
 	bep "github.com/chagui/besreceiver/internal/bep/buildeventstream"
 )
@@ -10,7 +11,8 @@ import (
 // buildInvocationGauges constructs per-invocation gauge metrics from a
 // BuildMetrics event. Returns a pmetric.Metrics containing gauges for timing,
 // action summary, and memory sub-messages. Nil sub-messages are skipped.
-func buildInvocationGauges(invocationID string, state *invocationState, metrics *bep.BuildMetrics, ts pcommon.Timestamp) pmetric.Metrics {
+// Per-mnemonic ActionData gauges are capped per opts to bound cardinality.
+func buildInvocationGauges(invocationID string, state *invocationState, metrics *bep.BuildMetrics, ts pcommon.Timestamp, opts actionDataOptions) pmetric.Metrics {
 	md := pmetric.NewMetrics()
 	rm := md.ResourceMetrics().AppendEmpty()
 	rm.Resource().Attributes().PutStr("service.name", "bazel")
@@ -25,6 +27,7 @@ func buildInvocationGauges(invocationID string, state *invocationState, metrics 
 
 	addTimingGauges(sm, metrics.GetTimingMetrics(), ts, attrs)
 	addActionSummaryGauges(sm, metrics.GetActionSummary(), ts, attrs)
+	addActionDataGauges(sm, metrics.GetActionSummary().GetActionData(), ts, attrs, opts)
 	addMemoryGauges(sm, metrics.GetMemoryMetrics(), ts, attrs)
 
 	return md
@@ -52,6 +55,44 @@ func addActionSummaryGauges(sm pmetric.ScopeMetrics, as *bep.BuildMetrics_Action
 	addGaugeInt64(sm, "bazel.invocation.actions_created", "{action}", "Total actions created during the build", ts, as.GetActionsCreated(), attrs)
 	addGaugeInt64(sm, "bazel.invocation.actions_created_not_including_aspects", "{action}", "Actions created for configured targets (excluding aspects)", ts, as.GetActionsCreatedNotIncludingAspects(), attrs)
 	addGaugeInt64(sm, "bazel.invocation.actions_executed", "{action}", "Total actions executed during the build", ts, as.GetActionsExecuted(), attrs)
+}
+
+// addActionDataGauges emits four gauges per mnemonic (actions_executed,
+// actions_created, system_time, user_time) as separate metric streams, each
+// data point carrying a bazel.action.mnemonic attribute on top of the shared
+// invocation attrs. Empty input → no metrics; nil Duration → 0. When the
+// list exceeds opts.maxEntries the first N are kept (Bazel ranks at source)
+// and a warning is logged to match the span-attribute truncation behavior.
+func addActionDataGauges(sm pmetric.ScopeMetrics, entries []*bep.BuildMetrics_ActionSummary_ActionData, ts pcommon.Timestamp, baseAttrs pcommon.Map, opts actionDataOptions) {
+	if len(entries) == 0 {
+		return
+	}
+	limit := len(entries)
+	if opts.maxEntries > 0 && limit > opts.maxEntries {
+		limit = opts.maxEntries
+		if opts.logger != nil {
+			opts.logger.Warn("Truncating ActionData entries on per-mnemonic gauges",
+				zap.String("invocation_id", opts.invocationID),
+				zap.Int("original_count", len(entries)),
+				zap.Int("limit", opts.maxEntries),
+			)
+		}
+	}
+	for i := range limit {
+		ad := entries[i]
+		attrs := pcommon.NewMap()
+		baseAttrs.CopyTo(attrs)
+		attrs.PutStr("bazel.action.mnemonic", ad.GetMnemonic())
+
+		addGaugeInt64(sm, "bazel.invocation.action.actions_executed", "{action}",
+			"Per-mnemonic actions executed during the build", ts, ad.GetActionsExecuted(), attrs)
+		addGaugeInt64(sm, "bazel.invocation.action.actions_created", "{action}",
+			"Per-mnemonic actions created during the build", ts, ad.GetActionsCreated(), attrs)
+		addGaugeInt64(sm, "bazel.invocation.action.system_time", "ms",
+			"Per-mnemonic kernel-mode CPU time", ts, durationToMs(ad.GetSystemTime()), attrs)
+		addGaugeInt64(sm, "bazel.invocation.action.user_time", "ms",
+			"Per-mnemonic user-mode CPU time", ts, durationToMs(ad.GetUserTime()), attrs)
+	}
 }
 
 func addMemoryGauges(sm pmetric.ScopeMetrics, mm *bep.BuildMetrics_MemoryMetrics, ts pcommon.Timestamp, attrs pcommon.Map) {

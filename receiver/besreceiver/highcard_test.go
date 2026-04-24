@@ -42,7 +42,7 @@ func TestBuildMetricsSpan_GarbageMetrics(t *testing.T) {
 		},
 	}
 
-	traces, _ := state.buildMetricsSpan(metrics)
+	traces, _ := state.buildMetricsSpan(metrics, actionDataOptions{})
 	span := traces.ResourceSpans().At(0).ScopeSpans().At(0).Spans().At(0)
 	attr, ok := span.Attributes().Get("bazel.metrics.garbage")
 	if !ok {
@@ -86,7 +86,7 @@ func TestBuildMetricsSpan_PackageLoad(t *testing.T) {
 		},
 	}
 
-	traces, _ := state.buildMetricsSpan(metrics)
+	traces, _ := state.buildMetricsSpan(metrics, actionDataOptions{})
 	span := traces.ResourceSpans().At(0).ScopeSpans().At(0).Spans().At(0)
 	attr, ok := span.Attributes().Get("bazel.metrics.package_load")
 	if !ok {
@@ -134,7 +134,7 @@ func TestBuildMetricsSpan_PackageLoad_NilDuration(t *testing.T) {
 		},
 	}
 
-	traces, _ := state.buildMetricsSpan(metrics)
+	traces, _ := state.buildMetricsSpan(metrics, actionDataOptions{})
 	span := traces.ResourceSpans().At(0).ScopeSpans().At(0).Spans().At(0)
 	attr, ok := span.Attributes().Get("bazel.metrics.package_load")
 	if !ok {
@@ -168,7 +168,7 @@ func TestBuildMetricsSpan_GraphValues(t *testing.T) {
 		},
 	}
 
-	traces, _ := state.buildMetricsSpan(metrics)
+	traces, _ := state.buildMetricsSpan(metrics, actionDataOptions{})
 	span := traces.ResourceSpans().At(0).ScopeSpans().At(0).Spans().At(0)
 
 	cases := map[string]struct {
@@ -208,7 +208,7 @@ func TestBuildMetricsSpan_NilSubMessages(t *testing.T) {
 	// nil MemoryMetrics / PackageMetrics / BuildGraphMetrics.
 	metrics := &bep.BuildMetrics{}
 
-	traces, truncs := state.buildMetricsSpan(metrics)
+	traces, truncs := state.buildMetricsSpan(metrics, actionDataOptions{})
 	if len(truncs) != 0 {
 		t.Errorf("expected no truncations, got %v", truncs)
 	}
@@ -247,7 +247,7 @@ func TestBuildMetricsSpan_EmptyLists(t *testing.T) {
 		},
 	}
 
-	traces, _ := state.buildMetricsSpan(metrics)
+	traces, _ := state.buildMetricsSpan(metrics, actionDataOptions{})
 	span := traces.ResourceSpans().At(0).ScopeSpans().At(0).Spans().At(0)
 
 	for _, name := range []string{
@@ -279,7 +279,7 @@ func TestBuildMetricsSpan_CapEnforcement_Garbage(t *testing.T) {
 		MemoryMetrics: &bep.BuildMetrics_MemoryMetrics{GarbageMetrics: garbage},
 	}
 
-	traces, truncs := state.buildMetricsSpan(metrics)
+	traces, truncs := state.buildMetricsSpan(metrics, actionDataOptions{})
 	span := traces.ResourceSpans().At(0).ScopeSpans().At(0).Spans().At(0)
 	attr, ok := span.Attributes().Get("bazel.metrics.garbage")
 	if !ok {
@@ -314,7 +314,7 @@ func TestBuildMetricsSpan_CapEnforcement_Graph(t *testing.T) {
 		},
 	}
 
-	traces, truncs := state.buildMetricsSpan(metrics)
+	traces, truncs := state.buildMetricsSpan(metrics, actionDataOptions{})
 	span := traces.ResourceSpans().At(0).ScopeSpans().At(0).Spans().At(0)
 	attr, _ := span.Attributes().Get("bazel.metrics.graph.dirtied_values")
 	if got := attr.Slice().Len(); got != 3 {
@@ -344,7 +344,7 @@ func TestBuildMetricsSpan_CapEnforcement_PackageLoad(t *testing.T) {
 		PackageMetrics: &bep.BuildMetrics_PackageMetrics{PackageLoadMetrics: pkgs},
 	}
 
-	traces, truncs := state.buildMetricsSpan(metrics)
+	traces, truncs := state.buildMetricsSpan(metrics, actionDataOptions{})
 	span := traces.ResourceSpans().At(0).ScopeSpans().At(0).Spans().At(0)
 	attr, _ := span.Attributes().Get("bazel.metrics.package_load")
 	if got := attr.Slice().Len(); got != 1 {

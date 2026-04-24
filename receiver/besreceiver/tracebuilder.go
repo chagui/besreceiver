@@ -31,6 +31,11 @@ import (
 const (
 	defaultInvocationTimeout = 1 * time.Hour
 	defaultReaperInterval    = 5 * time.Minute
+	// defaultMaxActionDataEntries caps per-mnemonic ActionData emission to 50
+	// entries by default. Bazel ranks the list by execution count at source, so
+	// the first 50 cover the heavy hitters; the cap limits attribute/metric
+	// cardinality for downstream backends. See Config.MaxActionDataEntries.
+	defaultMaxActionDataEntries = 50
 )
 
 // eventMsg is sent from gRPC handler goroutines to the owner goroutine.
@@ -51,6 +56,10 @@ type TraceBuilderConfig struct {
 	// high-cardinality BuildMetrics sub-messages. Zero-valued fields fall back
 	// to defaults via HighCardinalityCaps.withDefaults.
 	Caps HighCardinalityCaps
+	// MaxActionDataEntries caps per-mnemonic ActionData emission on the
+	// bazel.metrics span and as per-mnemonic gauges. Zero selects the default
+	// (defaultMaxActionDataEntries).
+	MaxActionDataEntries int
 }
 
 // TraceBuilder converts BEP events into OTel traces, logs, and metrics.
@@ -76,6 +85,11 @@ type TraceBuilder struct {
 	// Threaded into per-invocation state for local truncation decisions.
 	caps HighCardinalityCaps
 
+	// maxActionDataEntries caps per-mnemonic ActionData emission. Set from
+	// TraceBuilderConfig.MaxActionDataEntries with defaultMaxActionDataEntries
+	// as the zero-value fallback.
+	maxActionDataEntries int
+
 	// Cumulative counters for cross-invocation metrics.
 	counters *cumulativeCounters
 
@@ -90,6 +104,8 @@ type TraceBuilder struct {
 // NewTraceBuilder creates a new TraceBuilder.
 // Any consumer may be nil if that signal is not configured.
 // Zero-value fields in cfg get sensible defaults.
+//
+//nolint:gocritic // hugeParam: TraceBuilderConfig is intentionally passed by value — it is built once at startup and defaulted in place.
 func NewTraceBuilder(tracesConsumer consumer.Traces, logsConsumer consumer.Logs, metricsConsumer consumer.Metrics, logger *zap.Logger, cfg TraceBuilderConfig) *TraceBuilder {
 	if cfg.InvocationTimeout <= 0 {
 		cfg.InvocationTimeout = defaultInvocationTimeout
@@ -99,6 +115,9 @@ func NewTraceBuilder(tracesConsumer consumer.Traces, logsConsumer consumer.Logs,
 	}
 	if cfg.MeterProvider == nil {
 		cfg.MeterProvider = noop.NewMeterProvider()
+	}
+	if cfg.MaxActionDataEntries == 0 {
+		cfg.MaxActionDataEntries = defaultMaxActionDataEntries
 	}
 	meter := cfg.MeterProvider.Meter("besreceiver")
 	activeInvocations, _ := meter.Int64UpDownCounter("bes.invocations.active",
@@ -117,20 +136,21 @@ func NewTraceBuilder(tracesConsumer consumer.Traces, logsConsumer consumer.Logs,
 		metric.WithDescription("Total errors from the traces consumer"),
 	)
 	return &TraceBuilder{
-		tracesConsumer:    tracesConsumer,
-		logsConsumer:      logsConsumer,
-		metricsConsumer:   metricsConsumer,
-		logger:            logger,
-		invocationTimeout: cfg.InvocationTimeout,
-		reaperInterval:    cfg.ReaperInterval,
-		pii:               cfg.PII,
-		caps:              cfg.Caps.withDefaults(),
-		counters:          newCumulativeCounters(pcommon.NewTimestampFromTime(time.Now())),
-		activeInvocations: activeInvocations,
-		eventsProcessed:   eventsProcessed,
-		eventsReparented:  eventsReparented,
-		invocationsReaped: invocationsReaped,
-		consumerErrors:    consumerErrors,
+		tracesConsumer:       tracesConsumer,
+		logsConsumer:         logsConsumer,
+		metricsConsumer:      metricsConsumer,
+		logger:               logger,
+		invocationTimeout:    cfg.InvocationTimeout,
+		reaperInterval:       cfg.ReaperInterval,
+		pii:                  cfg.PII,
+		caps:                 cfg.Caps.withDefaults(),
+		maxActionDataEntries: cfg.MaxActionDataEntries,
+		counters:             newCumulativeCounters(pcommon.NewTimestampFromTime(time.Now())),
+		activeInvocations:    activeInvocations,
+		eventsProcessed:      eventsProcessed,
+		eventsReparented:     eventsReparented,
+		invocationsReaped:    invocationsReaped,
+		consumerErrors:       consumerErrors,
 	}
 }
 
@@ -752,7 +772,11 @@ func (tb *TraceBuilder) handleBuildMetrics(ctx context.Context, invocations map[
 		return nil
 	}
 
-	traces, truncs := state.buildMetricsSpan(metrics)
+	traces, truncs := state.buildMetricsSpan(metrics, actionDataOptions{
+		maxEntries:   tb.maxActionDataEntries,
+		logger:       tb.logger,
+		invocationID: invocationID,
+	})
 	for _, tr := range truncs {
 		tb.logger.Warn("Truncated high-cardinality bazel.metrics attribute",
 			zap.String("invocation_id", invocationID),
@@ -769,7 +793,11 @@ func (tb *TraceBuilder) handleBuildMetrics(ctx context.Context, invocations map[
 	)
 
 	ts := pcommon.NewTimestampFromTime(time.Now())
-	md := buildInvocationGauges(invocationID, state, metrics, ts)
+	md := buildInvocationGauges(invocationID, state, metrics, ts, actionDataOptions{
+		maxEntries:   tb.maxActionDataEntries,
+		logger:       tb.logger,
+		invocationID: invocationID,
+	})
 
 	// Update cumulative counters and merge into the same metrics payload.
 	tb.counters.record(metrics)

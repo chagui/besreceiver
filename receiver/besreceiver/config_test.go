@@ -124,3 +124,18 @@ func TestConfigValidate_ReaperIntervalExceedsTimeout(t *testing.T) {
 		t.Error("expected error when reaper_interval >= invocation_timeout")
 	}
 }
+
+func TestConfigDefaults_MaxActionDataEntries(t *testing.T) {
+	cfg := createDefaultConfig().(*Config)
+	if cfg.MaxActionDataEntries != defaultMaxActionDataEntries {
+		t.Errorf("expected default max_action_data_entries=%d, got %d", defaultMaxActionDataEntries, cfg.MaxActionDataEntries)
+	}
+}
+
+func TestConfigValidate_NegativeMaxActionDataEntries(t *testing.T) {
+	cfg := createDefaultConfig().(*Config)
+	cfg.MaxActionDataEntries = -1
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected error for negative max_action_data_entries")
+	}
+}

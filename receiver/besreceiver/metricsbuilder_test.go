@@ -27,7 +27,7 @@ func TestBuildInvocationMetrics_Timing(t *testing.T) {
 		},
 	}
 
-	md := buildInvocationGauges("inv-1", state, metrics, ts)
+	md := buildInvocationGauges("inv-1", state, metrics, ts, actionDataOptions{})
 
 	// 6 timing gauges.
 	if md.MetricCount() != 6 {
@@ -87,7 +87,7 @@ func TestBuildInvocationMetrics_ActionSummary(t *testing.T) {
 		},
 	}
 
-	md := buildInvocationGauges("inv-2", state, metrics, ts)
+	md := buildInvocationGauges("inv-2", state, metrics, ts, actionDataOptions{})
 
 	if md.MetricCount() != 3 {
 		t.Fatalf("expected 3 metrics, got %d", md.MetricCount())
@@ -129,7 +129,7 @@ func TestBuildInvocationMetrics_Memory(t *testing.T) {
 		},
 	}
 
-	md := buildInvocationGauges("inv-3", state, metrics, ts)
+	md := buildInvocationGauges("inv-3", state, metrics, ts, actionDataOptions{})
 
 	if md.MetricCount() != 2 {
 		t.Fatalf("expected 2 metrics, got %d", md.MetricCount())
@@ -165,7 +165,7 @@ func TestBuildInvocationMetrics_NilSubMessages(t *testing.T) {
 	}
 	metrics := &bep.BuildMetrics{} // all sub-messages nil
 
-	md := buildInvocationGauges("inv-nil", state, metrics, ts)
+	md := buildInvocationGauges("inv-nil", state, metrics, ts, actionDataOptions{})
 
 	if md.MetricCount() != 0 {
 		t.Fatalf("expected 0 metrics for nil sub-messages, got %d", md.MetricCount())
@@ -336,7 +336,7 @@ func TestBuildInvocationMetrics_AllCategories(t *testing.T) {
 		},
 	}
 
-	md := buildInvocationGauges("inv-all", state, metrics, ts)
+	md := buildInvocationGauges("inv-all", state, metrics, ts, actionDataOptions{})
 
 	// 5 timing (no CriticalPathTime since it's nil) + 3 action + 2 memory = 10.
 	if md.MetricCount() != 10 {

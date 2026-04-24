@@ -40,11 +40,12 @@ func (r *besReceiver) Start(ctx context.Context, host component.Host) error {
 	var startErr error
 	r.startOnce.Do(func() {
 		r.traceBuilder = NewTraceBuilder(r.tracesConsumer, r.logsConsumer, r.metricsConsumer, r.logger, TraceBuilderConfig{
-			InvocationTimeout: r.config.InvocationTimeout,
-			ReaperInterval:    r.config.ReaperInterval,
-			MeterProvider:     r.settings.MeterProvider,
-			PII:               r.config.PII,
-			Caps:              r.config.HighCardinalityCaps,
+			InvocationTimeout:    r.config.InvocationTimeout,
+			ReaperInterval:       r.config.ReaperInterval,
+			MeterProvider:        r.settings.MeterProvider,
+			PII:                  r.config.PII,
+			Caps:                 r.config.HighCardinalityCaps,
+			MaxActionDataEntries: r.config.MaxActionDataEntries,
 		})
 		r.traceBuilder.Start()
 
