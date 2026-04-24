@@ -24,7 +24,7 @@ func newMetricsSpanState() *invocationState {
 func metricsSpanAttrs(t *testing.T, metrics *bep.BuildMetrics) pcommon.Map {
 	t.Helper()
 	state := newMetricsSpanState()
-	traces := state.buildMetricsSpan(metrics)
+	traces, _ := state.buildMetricsSpan(metrics)
 	if traces.SpanCount() != 1 {
 		t.Fatalf("expected 1 span, got %d", traces.SpanCount())
 	}
@@ -397,10 +397,10 @@ func TestBuildMetricsSpan_WorkerPoolEmpty(t *testing.T) {
 	mustAbsent(t, attrs, "bazel.metrics.worker_pool")
 }
 
-// Intentionally-skipped sub-messages: GarbageMetrics (under MemoryMetrics),
-// PackageLoadMetrics (under PackageMetrics), WorkerMetrics, EvaluationStat
-// slices on BuildGraphMetrics, RuleClassCount, AspectCount, and
-// RemoteAnalysisCacheStatistics. None should produce span attrs.
+// Intentionally-skipped sub-messages after #29 landed: RuleClassCount and
+// AspectCount on BuildGraphMetrics, WorkerMetrics, and
+// RemoteAnalysisCacheStatistics. GarbageMetrics / PackageLoadMetrics /
+// EvaluationStat slices are now surfaced by #29 and covered by highcard_test.go.
 func TestBuildMetricsSpan_SkipsHighCardinalitySubMessages(t *testing.T) {
 	metrics := &bep.BuildMetrics{
 		MemoryMetrics: &bep.BuildMetrics_MemoryMetrics{
@@ -432,11 +432,6 @@ func TestBuildMetricsSpan_SkipsHighCardinalitySubMessages(t *testing.T) {
 	mustInt(t, attrs, "bazel.metrics.graph.action_count", 1)
 
 	skippedKeys := []string{
-		"bazel.metrics.memory.garbage_metrics",
-		"bazel.metrics.graph.dirtied_values",
-		"bazel.metrics.graph.changed_values",
-		"bazel.metrics.graph.built_values",
-		"bazel.metrics.graph.evaluated_values",
 		"bazel.metrics.graph.rule_class",
 		"bazel.metrics.graph.aspect",
 		"bazel.metrics.worker_metrics",

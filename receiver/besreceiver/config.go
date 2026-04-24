@@ -24,6 +24,66 @@ type Config struct {
 	// false; enabling a flag surfaces the matching attribute on the root or
 	// action span. See PIIConfig.
 	PII PIIConfig `mapstructure:"pii"`
+
+	// HighCardinalityCaps bounds the size of Slice[Map] attributes emitted on
+	// the bazel.metrics span from high-cardinality BuildMetrics sub-messages
+	// (GarbageMetrics, PackageLoadMetrics, EvaluationStat lists). Zero-valued
+	// fields fall back to defaults (see defaultHighCardinalityCaps). Exceeding
+	// a cap truncates the list and emits a Warn-level log.
+	HighCardinalityCaps HighCardinalityCaps `mapstructure:"high_cardinality_caps"`
+}
+
+// HighCardinalityCaps configures per-attribute limits on the Slice[Map]
+// attributes emitted on the bazel.metrics span for high-cardinality
+// BuildMetrics sub-messages. Emission is span-attribute-only (no standalone
+// metrics) to avoid series explosion in metrics backends. A value of 0 is
+// treated as "use default".
+type HighCardinalityCaps struct {
+	// Garbage caps the number of entries in bazel.metrics.garbage derived from
+	// MemoryMetrics.garbage_metrics. Default: 20.
+	Garbage int `mapstructure:"garbage"`
+	// PackageLoad caps the number of entries in bazel.metrics.package_load
+	// derived from PackageMetrics.package_load_metrics. Default: 100.
+	PackageLoad int `mapstructure:"package_load"`
+	// GraphValues caps the number of entries in each of the five
+	// bazel.metrics.graph.{dirtied,changed,built,cleaned,evaluated}_values
+	// attributes derived from BuildGraphMetrics. Default: 50.
+	GraphValues int `mapstructure:"graph_values"`
+}
+
+// defaultHighCardinalityCaps returns the documented default caps. Mirrored on
+// Config via createDefaultConfig so operator-supplied configs see the defaults
+// without having to opt in explicitly.
+// Default caps chosen for typical Bazel invocations; see HighCardinalityCaps
+// for rationale.
+const (
+	defaultCapGarbage     = 20
+	defaultCapPackageLoad = 100
+	defaultCapGraphValues = 50
+)
+
+func defaultHighCardinalityCaps() HighCardinalityCaps {
+	return HighCardinalityCaps{
+		Garbage:     defaultCapGarbage,
+		PackageLoad: defaultCapPackageLoad,
+		GraphValues: defaultCapGraphValues,
+	}
+}
+
+// withDefaults returns a copy of c where any zero-valued field is replaced
+// with the corresponding default.
+func (c HighCardinalityCaps) withDefaults() HighCardinalityCaps {
+	d := defaultHighCardinalityCaps()
+	if c.Garbage <= 0 {
+		c.Garbage = d.Garbage
+	}
+	if c.PackageLoad <= 0 {
+		c.PackageLoad = d.PackageLoad
+	}
+	if c.GraphValues <= 0 {
+		c.GraphValues = d.GraphValues
+	}
+	return c
 }
 
 // PIIConfig controls which potentially-sensitive fields from BEP events are
@@ -85,6 +145,15 @@ func (cfg *Config) Validate() error {
 	}
 	if cfg.InvocationTimeout > 0 && cfg.ReaperInterval > 0 && cfg.ReaperInterval >= cfg.InvocationTimeout {
 		return fmt.Errorf("reaper_interval (%s) must be less than invocation_timeout (%s)", cfg.ReaperInterval, cfg.InvocationTimeout)
+	}
+	if cfg.HighCardinalityCaps.Garbage < 0 {
+		return fmt.Errorf("high_cardinality_caps.garbage must not be negative, got %d", cfg.HighCardinalityCaps.Garbage)
+	}
+	if cfg.HighCardinalityCaps.PackageLoad < 0 {
+		return fmt.Errorf("high_cardinality_caps.package_load must not be negative, got %d", cfg.HighCardinalityCaps.PackageLoad)
+	}
+	if cfg.HighCardinalityCaps.GraphValues < 0 {
+		return fmt.Errorf("high_cardinality_caps.graph_values must not be negative, got %d", cfg.HighCardinalityCaps.GraphValues)
 	}
 	return nil
 }

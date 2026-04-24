@@ -47,6 +47,10 @@ type TraceBuilderConfig struct {
 	ReaperInterval    time.Duration
 	MeterProvider     metric.MeterProvider
 	PII               PIIConfig
+	// Caps bounds Slice[Map] attributes on the bazel.metrics span for
+	// high-cardinality BuildMetrics sub-messages. Zero-valued fields fall back
+	// to defaults via HighCardinalityCaps.withDefaults.
+	Caps HighCardinalityCaps
 }
 
 // TraceBuilder converts BEP events into OTel traces, logs, and metrics.
@@ -67,6 +71,10 @@ type TraceBuilder struct {
 	// state so finalize/addAction can make the decision locally without re-
 	// reaching into the builder.
 	pii PIIConfig
+
+	// caps bounds high-cardinality Slice[Map] attributes on bazel.metrics.
+	// Threaded into per-invocation state for local truncation decisions.
+	caps HighCardinalityCaps
 
 	// Cumulative counters for cross-invocation metrics.
 	counters *cumulativeCounters
@@ -116,6 +124,7 @@ func NewTraceBuilder(tracesConsumer consumer.Traces, logsConsumer consumer.Logs,
 		invocationTimeout: cfg.InvocationTimeout,
 		reaperInterval:    cfg.ReaperInterval,
 		pii:               cfg.PII,
+		caps:              cfg.Caps.withDefaults(),
 		counters:          newCumulativeCounters(pcommon.NewTimestampFromTime(time.Now())),
 		activeInvocations: activeInvocations,
 		eventsProcessed:   eventsProcessed,
@@ -322,7 +331,7 @@ func eventTypeName(event *bep.BuildEvent) string {
 func (tb *TraceBuilder) handleBuildStarted(ctx context.Context, invocations map[string]*invocationState, invocationID string, started *bep.BuildStarted) error {
 	traceID := traceIDFromUUID(started.GetUuid())
 	rootSpanID := spanIDFromIdentity(started.GetUuid(), "root")
-	invocations[invocationID] = newInvocationState(traceID, rootSpanID, started, time.Now(), tb.pii)
+	invocations[invocationID] = newInvocationState(traceID, rootSpanID, started, time.Now(), tb.pii, tb.caps)
 	tb.activeInvocations.Add(ctx, 1)
 
 	tb.logger.Debug("Build started",
@@ -743,7 +752,15 @@ func (tb *TraceBuilder) handleBuildMetrics(ctx context.Context, invocations map[
 		return nil
 	}
 
-	traces := state.buildMetricsSpan(metrics)
+	traces, truncs := state.buildMetricsSpan(metrics)
+	for _, tr := range truncs {
+		tb.logger.Warn("Truncated high-cardinality bazel.metrics attribute",
+			zap.String("invocation_id", invocationID),
+			zap.String("attribute", tr.attribute),
+			zap.Int("original_count", tr.original),
+			zap.Int("kept", tr.kept),
+		)
+	}
 
 	tb.emitLog(ctx, state, invocationID, "bazel.build.metrics",
 		"Build metrics",
