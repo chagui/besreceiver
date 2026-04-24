@@ -342,6 +342,11 @@ func (tb *TraceBuilder) processEvent(ctx context.Context, invocations map[string
 			return nil
 		}
 		return tb.handleExecRequestConstructed(ctx, invocations, invocationID, p.ExecRequest)
+	case *bep.BuildEvent_Fetch:
+		if p.Fetch == nil {
+			return nil
+		}
+		return tb.handleFetch(ctx, invocations, invocationID, event.GetId(), p.Fetch)
 	}
 	return nil
 }
@@ -383,6 +388,8 @@ func eventTypeName(event *bep.BuildEvent) string {
 		return "structured_command_line"
 	case *bep.BuildEvent_ExecRequest:
 		return "exec_request"
+	case *bep.BuildEvent_Fetch:
+		return "fetch"
 	default:
 		return "other"
 	}
@@ -921,6 +928,70 @@ func newLogPayload() (plog.Logs, plog.LogRecord) {
 	sl := rl.ScopeLogs().AppendEmpty()
 	sl.Scope().SetName("besreceiver")
 	return logs, sl.LogRecords().AppendEmpty()
+}
+
+// handleFetch emits a bazel.fetch span for a Fetch BEP event, parented
+// under the root bazel.build span. A Fetch before BuildStarted (unknown
+// invocation) or with an empty URL is silently dropped. Filter gate is
+// enforced once at the top of the handler so log emission and span
+// emission share the same suppression contract — without the early
+// gate, drop/build_only would still leak the redacted URL into the
+// logs pipeline.
+//
+// Timing is zero-width at event-processing time; the Fetch proto carries
+// no per-event timestamps and inferring duration from invocation
+// createdAt produced flamegraph-spanning bars (see review of #70).
+func (tb *TraceBuilder) handleFetch(ctx context.Context, invocations map[string]*invocationState, invocationID string, eventID *bep.BuildEventId, fetch *bep.Fetch) error {
+	state := invocations[invocationID]
+	if state == nil {
+		return nil
+	}
+
+	rawURL := eventID.GetFetch().GetUrl()
+	if rawURL == "" {
+		return nil
+	}
+
+	// Hoist the filter gate above log emission so drop/build_only
+	// suppress the URL on every pathway, not just the span.
+	if !state.filter.LevelForTarget("").allowFetch() {
+		return nil
+	}
+
+	displayURL := redactFetchURL(rawURL, state.pii.IncludeFetchQueryString)
+	success := fetch.GetSuccess()
+	state.fetchSeq++
+	in := fetchSpanInput{
+		displayURL: displayURL,
+		downloader: eventID.GetFetch().GetDownloader(),
+		seq:        state.fetchSeq,
+		success:    success,
+		at:         time.Now(),
+	}
+
+	severity := plog.SeverityNumberInfo
+	body := fmt.Sprintf("Fetch succeeded: %s", displayURL)
+	if !success {
+		severity = plog.SeverityNumberError
+		body = fmt.Sprintf("Fetch failed: %s", displayURL)
+	}
+	tb.emitLog(ctx, state, invocationID, "bazel.fetch",
+		body, severity, in.at,
+		map[string]string{
+			"bazel.fetch.url":        displayURL,
+			"bazel.fetch.success":    strconv.FormatBool(success),
+			"bazel.fetch.downloader": in.downloader.String(),
+		},
+	)
+
+	// Post-flush arrivals ride the same traceID in a standalone payload.
+	if state.flushed {
+		traces := state.lateFetchSpan(in)
+		return tb.consumeAndRecord(ctx, traces)
+	}
+
+	state.addFetch(in)
+	return nil
 }
 
 func (tb *TraceBuilder) handleBuildMetrics(ctx context.Context, invocations map[string]*invocationState, invocationID string, metrics *bep.BuildMetrics) error {

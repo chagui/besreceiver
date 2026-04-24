@@ -2,6 +2,7 @@ package besreceiver
 
 import (
 	"math"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -129,6 +130,12 @@ type invocationState struct {
 	// filtering or span emission, so totals reflect the full build even when
 	// detail-level filtering (see #13) suppresses the matching span.
 	summaryCounts BuildSummary
+
+	// fetchSeq disambiguates SpanIDs for repeated fetches of the same URL
+	// within one invocation (transient retries, multi-arch toolchain pulls,
+	// repository_cache evictions). Combined with FetchId.Downloader the
+	// resulting SpanID is unique per fetch event in the stream.
+	fetchSeq int64
 }
 
 // BuildSummary holds per-invocation aggregate counters emitted as
@@ -943,6 +950,110 @@ func (s *invocationState) lateActionSpan(label, configID, primaryOutput string, 
 	parentSpanID, _ := s.resolveTargetSpan(label, configID)
 	s.populateActionSpan(span, parentSpanID, label, primaryOutput, action)
 	return traces
+}
+
+// fetchSpanInput carries everything populateFetchSpan needs. The handler
+// captures these once so pre-flush and post-flush paths share the same
+// redacted URL, downloader name, and zero-width timestamp.
+type fetchSpanInput struct {
+	displayURL string                              // already redacted; used for span attr + log body
+	downloader bep.BuildEventId_FetchId_Downloader // proto enum; emitted as bazel.fetch.downloader
+	seq        int64                               // per-invocation counter — disambiguates SpanIDs
+	success    bool
+	at         time.Time // event-processing time; zero-width span anchors here
+}
+
+// addFetch appends a bazel.fetch span for a Fetch BEP event.
+//
+// Filter gate (allowFetch): suppressed at drop / build_only. The fetch
+// has no owning target so the filter is queried with an empty label,
+// which falls through to default_level — per-rule patterns are
+// unreachable for fetches (documented in docs/attributes.md).
+func (s *invocationState) addFetch(in fetchSpanInput) {
+	if s.flushed {
+		return
+	}
+	if in.displayURL == "" {
+		return
+	}
+	if !s.filter.LevelForTarget("").allowFetch() {
+		return
+	}
+	span := s.appendSpan()
+	s.populateFetchSpan(span, in)
+}
+
+// populateFetchSpan stamps identity, parenting, timing, attributes, and
+// status on a pre-appended fetch span. Shared by the pre-flush addFetch
+// path and the post-flush lateFetchSpan path.
+//
+// Timing is zero-width at in.at — the Fetch proto carries no per-event
+// timestamps and inferring duration from invocation createdAt produced
+// 5-minute-wide bars on the flamegraph. A zero-width span at the
+// event-processing instant correctly indicates "this fetch happened"
+// without fabricating a duration.
+//
+// SpanID disambiguation mixes downloader + per-invocation sequence
+// counter into the identity hash so retries, multi-arch toolchain pulls,
+// and repository_cache evictions don't collapse onto the same SpanID.
+func (s *invocationState) populateFetchSpan(span ptrace.Span, in fetchSpanInput) {
+	downloader := in.downloader.String()
+	span.SetSpanID(spanIDFromIdentity(s.uuid, "fetch", in.displayURL, downloader, strconv.FormatInt(in.seq, 10)))
+	span.SetParentSpanID(s.rootSpanID)
+	span.SetName("bazel.fetch")
+	span.SetKind(ptrace.SpanKindClient)
+
+	ts := pcommon.NewTimestampFromTime(in.at)
+	span.SetStartTimestamp(ts)
+	span.SetEndTimestamp(ts)
+
+	span.Attributes().PutStr("bazel.fetch.url", in.displayURL)
+	span.Attributes().PutBool("bazel.fetch.success", in.success)
+	if downloader != "" {
+		span.Attributes().PutStr("bazel.fetch.downloader", downloader)
+	}
+
+	if !in.success {
+		span.Status().SetCode(ptrace.StatusCodeError)
+		span.Status().SetMessage("fetch failed: " + in.displayURL)
+	}
+}
+
+// lateFetchSpan emits a standalone bazel.fetch span for a Fetch event
+// that arrived after the main batch was flushed. Same pattern as
+// lateActionSpan / lateTestResultSpan.
+func (s *invocationState) lateFetchSpan(in fetchSpanInput) ptrace.Traces {
+	traces, ss := newTracesPayload()
+	span := ss.Spans().AppendEmpty()
+	span.SetTraceID(s.traceID)
+	s.populateFetchSpan(span, in)
+	return traces
+}
+
+// redactFetchURL strips userinfo (and optionally the query string) from
+// fetch URLs before emission. URLs Bazel sees can carry credentials
+// inline (`https://user:token@host/...`) and pre-signed S3/GCS query
+// params; both are silent PII leaks if forwarded verbatim into traces or
+// logs. Userinfo is always stripped; the query string is gated by
+// PII.IncludeFetchQueryString (default false).
+//
+// Falls back to the original string when url.Parse fails — Bazel's BEP
+// also carries non-RFC-3986 references like `oci://repo/image@sha256:…`
+// and bare paths for `file://` mirrors. Returning those untouched is
+// safer than returning empty (which would suppress the span).
+func redactFetchURL(s string, includeQuery bool) string {
+	if s == "" {
+		return s
+	}
+	u, err := url.Parse(s)
+	if err != nil || u.Scheme == "" {
+		return s
+	}
+	u.User = nil
+	if !includeQuery {
+		u.RawQuery = ""
+	}
+	return u.Redacted()
 }
 
 // lateTestResultSpan emits a standalone bazel.test span for a TestResult

@@ -402,6 +402,31 @@ func makeProgressOBE(t testing.TB, invID string, seqNum int64, stdout, stderr st
 	})
 }
 
+// makeFetchOBE builds a BuildEvent_Fetch ordered build event with the url
+// carried on the BuildEventId (where Bazel actually puts it) and success
+// on the payload. Defaults the downloader enum to UNKNOWN; use
+// makeFetchOBEWithDownloader to exercise the HTTP / GRPC variants.
+func makeFetchOBE(t testing.TB, invID, url string, seqNum int64, success bool) *pb.OrderedBuildEvent {
+	t.Helper()
+	return makeFetchOBEWithDownloader(t, invID, url, seqNum, success, bep.BuildEventId_FetchId_UNKNOWN)
+}
+
+// makeFetchOBEWithDownloader is the full-arity helper exposing
+// FetchId.Downloader.
+func makeFetchOBEWithDownloader(t testing.TB, invID, url string, seqNum int64, success bool, downloader bep.BuildEventId_FetchId_Downloader) *pb.OrderedBuildEvent {
+	t.Helper()
+	return makeOrderedBuildEvent(t, invID, seqNum, &bep.BuildEvent{
+		Id: &bep.BuildEventId{
+			Id: &bep.BuildEventId_Fetch{
+				Fetch: &bep.BuildEventId_FetchId{Url: url, Downloader: downloader},
+			},
+		},
+		Payload: &bep.BuildEvent_Fetch{
+			Fetch: &bep.Fetch{Success: success},
+		},
+	})
+}
+
 func makeBuildMetricsOBE(t testing.TB, invID string, seqNum, wallMs, cpuMs int64) *pb.OrderedBuildEvent {
 	t.Helper()
 	return makeOrderedBuildEvent(t, invID, seqNum, &bep.BuildEvent{

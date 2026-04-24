@@ -20,6 +20,7 @@ bazel.build (root)
 ├── bazel.target
 │   ├── bazel.test
 │   └── bazel.test
+├── bazel.fetch
 └── bazel.metrics
 ```
 
@@ -147,6 +148,54 @@ start plus `test_attempt_duration` when set.
 Status is `ERROR` with the enum name as the message when the status is
 anything other than `PASSED`.
 
+## `bazel.fetch`
+
+One span per external-resource `Fetch` BEP event, parented directly to
+the root `bazel.build` span. Emitted only when Bazel actually fetched
+the resource — cached hits produce no event and therefore no span. Name
+is `bazel.fetch`, span kind is `Client`.
+
+Timing is **zero-width** at the event's processing instant. The Fetch
+proto carries no per-event timestamps, and inferring duration from
+invocation start would paint every fetch as a build-stream-spanning
+bar, dwarfing every other span on the flamegraph. A zero-width span
+correctly says "this fetch happened" without fabricating duration.
+When richer timing matters, future work could thread
+`OrderedBuildEvent.Event.EventTime` through to anchor the span on the
+BES envelope timestamp.
+
+| Attribute                  | Type   | Source                                                           |
+|----------------------------|--------|------------------------------------------------------------------|
+| `bazel.fetch.url`          | string | `FetchId.url`, redacted (see below)                              |
+| `bazel.fetch.success`      | bool   | `Fetch.success`                                                  |
+| `bazel.fetch.downloader`   | string | `FetchId.Downloader` enum (`HTTP`, `GRPC`, `UNKNOWN`)            |
+
+**URL redaction.** The receiver strips userinfo (`user:token@host`)
+unconditionally — fetch URLs frequently carry credentials inline, and
+forwarding the raw form into traces or logs is a silent PII leak. The
+query string is also stripped by default because pre-signed S3/GCS URLs
+put credentials in `X-Amz-*` parameters; operators who explicitly want
+the query string (debugging a custom mirror, tracking version params)
+can opt in via `pii.include_fetch_query_string: true`. Non-RFC-3986
+references like `oci://repo/image@sha256:…` and `file://` mirror paths
+are passed through unmodified rather than dropped — better to emit the
+original than nothing.
+
+**SpanID disambiguation.** SpanIDs mix the URL, the downloader enum,
+and a per-invocation sequence counter so retries (transient HTTP
+failures, `repository_cache` evictions, multi-arch toolchain pulls)
+produce distinct SpanIDs that downstream backends do not collapse.
+
+A fetch with an empty URL or one that arrives before `BuildStarted` is
+silently dropped. Status is set to `ERROR` with message
+`"fetch failed: <redacted-url>"` when `Fetch.success` is false;
+otherwise `Unset`. Fetch spans are per-invocation detail — the `filter`
+block suppresses them at `default_level: drop` and
+`default_level: build_only`. Per-rule patterns (`//pkg:target`,
+`//pkg/...`) do **not** apply to fetches: a fetch has no owning target,
+so the filter is queried with an empty label which falls through to the
+configured `default_level`.
+
 ## `bazel.metrics`
 
 One span per invocation, emitted from `BuildMetrics`. Carries timing and
@@ -201,6 +250,7 @@ receivers:
       include_workspace_dir: false         # bazel.workspace_directory + matching workspace/metadata keys
       include_working_dir: false           # bazel.working_directory + bazel.run.working_directory + matching workspace/metadata keys
       include_command_args: false          # bazel.action.command_line + bazel.run.argv + bazel.run.environment
+      include_fetch_query_string: false    # preserve query string on bazel.fetch.url (default off — strips pre-signed S3/GCS creds)
       include_action_output_paths: false   # bazel.action.primary_output
       include_workspace_status: false      # bazel.workspace.* pathway (per-key filtered)
       include_build_metadata: false        # bazel.metadata.* pathway (per-key filtered)

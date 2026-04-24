@@ -195,6 +195,13 @@ type PIIConfig struct {
 	// string is free-form so per-field filtering is not attempted —
 	// operators needing finer control should layer a redactionprocessor.
 	IncludeCommandLine bool `mapstructure:"include_command_line"`
+	// IncludeFetchQueryString controls whether `bazel.fetch.url` (and the
+	// matching log body) preserves the URL query string. Default false:
+	// fetch URLs frequently carry pre-signed credentials in query params
+	// (S3, GCS) so the receiver strips them. Operators who deliberately
+	// want the full URL — e.g. to debug a custom mirror — opt in here.
+	// Userinfo (`user:pass@host`) is always stripped regardless.
+	IncludeFetchQueryString bool `mapstructure:"include_fetch_query_string"`
 }
 
 // Validate checks that the receiver configuration is valid.
