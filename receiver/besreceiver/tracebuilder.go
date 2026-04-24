@@ -372,16 +372,6 @@ func (tb *TraceBuilder) handleTargetConfigured(ctx context.Context, invocations 
 		}
 	}
 
-	reparented := state.addTarget(tc.GetLabel(), configured.GetTargetKind(), configID)
-	if reparented > 0 {
-		tb.eventsReparented.Add(ctx, int64(reparented))
-		tb.logger.Debug("Reparented out-of-order spans under target",
-			zap.String("invocation_id", invocationID),
-			zap.String("label", tc.GetLabel()),
-			zap.Int("count", reparented),
-		)
-	}
-
 	tb.logger.Debug("Target configured",
 		zap.String("invocation_id", invocationID),
 		zap.String("label", tc.GetLabel()),
@@ -396,6 +386,24 @@ func (tb *TraceBuilder) handleTargetConfigured(ctx context.Context, invocations 
 		},
 	)
 
+	// Post-flush arrivals emit a standalone traces payload, matching the
+	// pattern established for BuildMetrics (see handleBuildMetrics). This
+	// preserves the span instead of silently dropping it when a future Bazel
+	// version emits TargetConfigured after BuildFinished.
+	if state.flushed {
+		traces := state.lateTargetSpan(tc.GetLabel(), configured.GetTargetKind(), configID)
+		return tb.consumeAndRecord(ctx, traces)
+	}
+
+	reparented := state.addTarget(tc.GetLabel(), configured.GetTargetKind(), configID)
+	if reparented > 0 {
+		tb.eventsReparented.Add(ctx, int64(reparented))
+		tb.logger.Debug("Reparented out-of-order spans under target",
+			zap.String("invocation_id", invocationID),
+			zap.String("label", tc.GetLabel()),
+			zap.Int("count", reparented),
+		)
+	}
 	return nil
 }
 
@@ -415,8 +423,6 @@ func (tb *TraceBuilder) handleActionExecuted(ctx context.Context, invocations ma
 		primaryOutput = ac.GetPrimaryOutput()
 	}
 
-	state.addAction(label, configID, primaryOutput, action)
-
 	severity := plog.SeverityNumberInfo
 	body := fmt.Sprintf("Action completed: %s %s", action.GetType(), label)
 	if !action.GetSuccess() {
@@ -435,6 +441,13 @@ func (tb *TraceBuilder) handleActionExecuted(ctx context.Context, invocations ma
 		},
 	)
 
+	// Post-flush arrivals emit a standalone traces payload (see handleBuildMetrics).
+	if state.flushed {
+		traces := state.lateActionSpan(label, configID, primaryOutput, action)
+		return tb.consumeAndRecord(ctx, traces)
+	}
+
+	state.addAction(label, configID, primaryOutput, action)
 	return nil
 }
 
@@ -451,8 +464,6 @@ func (tb *TraceBuilder) handleTestResult(ctx context.Context, invocations map[st
 		label = tr.GetLabel()
 		configID = tr.GetConfiguration().GetId()
 	}
-
-	state.addTestResult(label, configID, tr, result)
 
 	severity := plog.SeverityNumberInfo
 	body := fmt.Sprintf("Test passed: %s", label)
@@ -472,6 +483,13 @@ func (tb *TraceBuilder) handleTestResult(ctx context.Context, invocations map[st
 		},
 	)
 
+	// Post-flush arrivals emit a standalone traces payload (see handleBuildMetrics).
+	if state.flushed {
+		traces := state.lateTestResultSpan(label, configID, tr, result)
+		return tb.consumeAndRecord(ctx, traces)
+	}
+
+	state.addTestResult(label, configID, tr, result)
 	return nil
 }
 
