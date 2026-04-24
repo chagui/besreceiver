@@ -423,6 +423,49 @@ func makeBuildMetricsOBE(t testing.TB, invID string, seqNum, wallMs, cpuMs int64
 	})
 }
 
+// makeExecRequestConstructedOBE builds an ExecRequestConstructed event for
+// `bazel run` tests. argv and envVars are emitted as-is (argv as a list of
+// strings, env as a list of name=value pairs). workingDir and shouldExec are
+// set directly on the payload. The BEP proto types these fields as bytes, so
+// we cast through []byte to match the generated Go shape.
+func makeExecRequestConstructedOBE(t testing.TB, invID string, seqNum int64, argv []string, workingDir string, env map[string]string, shouldExec bool) *pb.OrderedBuildEvent {
+	t.Helper()
+	argvBytes := make([][]byte, 0, len(argv))
+	for _, a := range argv {
+		argvBytes = append(argvBytes, []byte(a))
+	}
+	// Sort env by key for deterministic emission — BEP map iteration order is
+	// non-deterministic and assertions on the environment slice compare by
+	// index.
+	keys := make([]string, 0, len(env))
+	for k := range env {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	envVars := make([]*bep.EnvironmentVariable, 0, len(env))
+	for _, k := range keys {
+		envVars = append(envVars, &bep.EnvironmentVariable{
+			Name:  []byte(k),
+			Value: []byte(env[k]),
+		})
+	}
+	return makeOrderedBuildEvent(t, invID, seqNum, &bep.BuildEvent{
+		Id: &bep.BuildEventId{
+			Id: &bep.BuildEventId_ExecRequest{
+				ExecRequest: &bep.BuildEventId_ExecRequestId{},
+			},
+		},
+		Payload: &bep.BuildEvent_ExecRequest{
+			ExecRequest: &bep.ExecRequestConstructed{
+				Argv:                argvBytes,
+				WorkingDirectory:    []byte(workingDir),
+				EnvironmentVariable: envVars,
+				ShouldExec:          shouldExec,
+			},
+		},
+	})
+}
+
 // sendAndACK sends a request on the stream, receives the ACK, and asserts the sequence number matches.
 func sendAndACK(t testing.TB, stream pb.PublishBuildEvent_PublishBuildToolEventStreamClient, req *pb.PublishBuildToolEventStreamRequest, expectedSeq int64) {
 	t.Helper()
