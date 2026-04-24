@@ -1,0 +1,6 @@
+# The build context for this image only needs the builder-config.yaml and the
+# collector-config.yaml. Everything else is noise — excluding it keeps the
+# context upload small and avoids cache invalidation from unrelated changes.
+*
+!builder-config.yaml
+!collector-config.yaml
