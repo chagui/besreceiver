@@ -1,0 +1,40 @@
+# OpenTelemetry Collector Builder (OCB) manifest for the otelcol-bazel image.
+#
+# This file is the source of truth for the image monorepo. All four version
+# axes below MUST stay in sync when bumping:
+#   1. `besreceiver` gomod version
+#   2. `go.opentelemetry.io/collector/*` stable   (v1.x)
+#   3. `go.opentelemetry.io/collector/*` beta     (v0.x) — MUST match OCB_VERSION
+#   4. `github.com/open-telemetry/opentelemetry-collector-contrib/*` release
+#
+# The OCB binary version (`OCB_VERSION` in Dockerfile) MUST equal the beta
+# version below. OCB refuses to build when its own version disagrees with the
+# collector-core modules it emits.
+#
+# Unlike the repo-local `builder-config.yaml` at the project root (which uses
+# `path: "."` for dev iteration), this manifest pins besreceiver to a remote
+# tagged version so the image can be built from the builder-config alone,
+# without needing the receiver source in the build context.
+
+dist:
+  name: otelcol-bazel
+  description: "OpenTelemetry Collector with besreceiver for Bazel BEP streams"
+  output_path: ./otelcol-bazel
+  version: 0.1.0
+
+receivers:
+  - gomod: "github.com/chagui/besreceiver v0.1.0"
+    import: "github.com/chagui/besreceiver/receiver/besreceiver"
+
+exporters:
+  - gomod: go.opentelemetry.io/collector/exporter/otlpexporter v0.146.1
+  - gomod: go.opentelemetry.io/collector/exporter/debugexporter v0.146.1
+
+processors:
+  - gomod: go.opentelemetry.io/collector/processor/batchprocessor v0.146.1
+  - gomod: go.opentelemetry.io/collector/processor/memorylimiterprocessor v0.146.1
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/processor/redactionprocessor v0.146.0
+
+extensions:
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/extension/healthcheckextension v0.146.0
+  - gomod: github.com/open-telemetry/opentelemetry-collector-contrib/extension/bearertokenauthextension v0.146.0

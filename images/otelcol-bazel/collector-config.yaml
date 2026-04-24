@@ -1,0 +1,82 @@
+# otelcol-bazel default configuration, CI / container-native.
+#
+# Bound interfaces (OTel security guidance — no 0.0.0.0):
+#   - `bes` (BES gRPC ingress) binds to ${env:BES_LISTEN_ADDR} which the
+#     operator MUST set. Recommended values:
+#       - In Kubernetes: ${env:POD_IP} from the downward API
+#       - In Docker: the container's interface IP, or a private network address
+#       - For local testing: 127.0.0.1
+#     There is no safe default for this variable because exposing BES
+#     unauthenticated on all interfaces in CI is precisely what the OTel
+#     security guidance warns against. The collector will fail to start
+#     rather than silently bind 0.0.0.0.
+#   - Health check and internal telemetry bind to 127.0.0.1 (in-pod only).
+#
+# Datadog Agent egress:
+#   - `${env:DD_AGENT_HOST}` points at the Datadog Agent (sidecar DaemonSet,
+#     or node-local agent). Set `DD_AGENT_HOST=$(NODE_IP)` from the downward
+#     API in Kubernetes, or `host.docker.internal` / service name in Docker.
+#
+# To override this config, bind-mount a replacement at
+# /etc/otelcol-bazel/config.yaml, or pass a different path via `--config`.
+
+extensions:
+  health_check:
+    endpoint: "127.0.0.1:13133"
+
+receivers:
+  bes:
+    endpoint: "${env:BES_LISTEN_ADDR}:8082"
+    # Enable bearer-token auth in production by extending this file.
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 512
+    spike_limit_mib: 128
+  batch:
+    send_batch_size: 8192
+    send_batch_max_size: 8192
+    timeout: 200ms
+
+exporters:
+  otlp_grpc/datadog:
+    endpoint: "${env:DD_AGENT_HOST}:4317"
+    tls:
+      insecure: true # Acceptable only for same-host / sidecar agent topology.
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      max_elapsed_time: 300s
+    sending_queue:
+      enabled: true
+      num_consumers: 10
+      queue_size: 5000
+
+service:
+  extensions: [health_check]
+  telemetry:
+    logs:
+      level: info
+    metrics:
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: "127.0.0.1"
+                port: 8888
+  pipelines:
+    traces:
+      receivers: [bes]
+      processors: [memory_limiter, batch]
+      exporters: [otlp_grpc/datadog]
+    logs:
+      receivers: [bes]
+      processors: [memory_limiter, batch]
+      exporters: [otlp_grpc/datadog]
+    # Note: the `metrics` pipeline is intentionally absent. The pinned
+    # besreceiver v0.1.0 exposes traces + logs only; metrics support landed
+    # after v0.1.0. Re-add the metrics pipeline when bumping the pin to
+    # a release that advertises `metrics: Alpha` (check via
+    # `otelcol-bazel components`).
