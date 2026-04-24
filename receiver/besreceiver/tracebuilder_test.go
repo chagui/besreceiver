@@ -17,6 +17,8 @@ import (
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/plog"
 	"go.opentelemetry.io/collector/pdata/ptrace"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"go.uber.org/zap"
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -1262,6 +1264,130 @@ func TestTestResultBeforeTarget(t *testing.T) {
 
 	assert.Equal(t, targetSpan.SpanID, testSpan.ParentSpanID,
 		"test should be child of target even when test result arrives first")
+}
+
+// TestReparent_CounterMetric verifies that bes.events.reparented is
+// incremented by one per action/test span reparented onto a late-arriving
+// target span, and is not incremented when events arrive in order.
+func TestReparent_CounterMetric(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{
+		MeterProvider: mp,
+	})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	// Mixed: one action and one test both arrive before their target, a
+	// second target arrives in-order (no reparent). Expected counter = 2.
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-reparent", "uuid-reparent", "build", 1),
+		// Out-of-order: action + test arrive before //pkg:lib.
+		makeActionOBE(t, "inv-reparent", "//pkg:lib", "Javac", 2, true),
+		makeTestResultOBE(t, "inv-reparent", "//pkg:lib", 3, bep.TestStatus_PASSED),
+		makeTargetConfiguredOBE(t, "inv-reparent", "//pkg:lib", 4),
+		// In-order: target arrives before its action.
+		makeTargetConfiguredOBE(t, "inv-reparent", "//pkg:other", 5),
+		makeActionOBE(t, "inv-reparent", "//pkg:other", "GoCompile", 6, true),
+		makeBuildFinishedOBE(t, "inv-reparent", 7, 0, "SUCCESS"),
+	)
+
+	assert.Equal(t, int64(2), readCounter(t, reader, "bes.events.reparented"),
+		"expected 2 reparented spans (one action + one test for //pkg:lib)")
+}
+
+// TestReparent_CounterNotIncrementedWhenInOrder verifies that the
+// bes.events.reparented counter stays at zero for fully in-order streams.
+func TestReparent_CounterNotIncrementedWhenInOrder(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{
+		MeterProvider: mp,
+	})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-inorder", "uuid-inorder", "build", 1),
+		makeTargetConfiguredOBE(t, "inv-inorder", "//pkg:lib", 2),
+		makeActionOBE(t, "inv-inorder", "//pkg:lib", "Javac", 3, true),
+		makeBuildFinishedOBE(t, "inv-inorder", 4, 0, "SUCCESS"),
+	)
+
+	assert.Equal(t, int64(0), readCounter(t, reader, "bes.events.reparented"),
+		"in-order streams must not increment the reparent counter")
+}
+
+// TestReparent_OrphanAtFinalize covers the case where an action arrives
+// before its target and TargetConfigured never arrives. The action span
+// stays parented to root (explicit orphan), no reparenting happens, and
+// the counter is not incremented.
+func TestReparent_OrphanAtFinalize(t *testing.T) {
+	reader := sdkmetric.NewManualReader()
+	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{
+		MeterProvider: mp,
+	})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	// Action arrives, then BuildFinished — no TargetConfigured ever.
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-orphan", "uuid-orphan", "build", 1),
+		makeActionOBE(t, "inv-orphan", "//pkg:lib", "Javac", 2, true),
+		makeBuildFinishedOBE(t, "inv-orphan", 3, 0, "SUCCESS"),
+	)
+
+	require.Equal(t, 2, sink.SpanCount(), "expected 2 spans: root + orphaned action")
+
+	spans := collectSpans(t, sink)
+	var actionSpan, rootSpan spanInfo
+	for _, s := range spans {
+		switch {
+		case s.Name == "bazel.action Javac":
+			actionSpan = s
+		case strings.HasPrefix(s.Name, "bazel.build"):
+			rootSpan = s
+		}
+	}
+	require.NotEmpty(t, actionSpan.Name, "action span not found")
+	require.NotEmpty(t, rootSpan.Name, "root span not found")
+
+	assert.Equal(t, rootSpan.SpanID, actionSpan.ParentSpanID,
+		"orphan action without TargetConfigured must stay parented to root")
+	assert.Equal(t, int64(0), readCounter(t, reader, "bes.events.reparented"),
+		"orphan at finalize must not increment reparent counter")
+}
+
+// readCounter reads the int sum value of a counter metric by name from a
+// ManualReader. Returns 0 if the metric is not present.
+func readCounter(t testing.TB, reader *sdkmetric.ManualReader, name string) int64 {
+	t.Helper()
+	var rm metricdata.ResourceMetrics
+	require.NoError(t, reader.Collect(context.Background(), &rm))
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != name {
+				continue
+			}
+			sum, ok := m.Data.(metricdata.Sum[int64])
+			if !ok {
+				t.Fatalf("metric %s is not Sum[int64]: %T", name, m.Data)
+			}
+			var total int64
+			for _, dp := range sum.DataPoints {
+				total += dp.Value
+			}
+			return total
+		}
+	}
+	return 0
 }
 
 // --- Aborted event tests (issue #20) ---

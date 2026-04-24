@@ -74,6 +74,7 @@ type TraceBuilder struct {
 	// Internal metrics for observability.
 	activeInvocations metric.Int64UpDownCounter
 	eventsProcessed   metric.Int64Counter
+	eventsReparented  metric.Int64Counter
 	invocationsReaped metric.Int64Counter
 	consumerErrors    metric.Int64Counter
 }
@@ -98,6 +99,9 @@ func NewTraceBuilder(tracesConsumer consumer.Traces, logsConsumer consumer.Logs,
 	eventsProcessed, _ := meter.Int64Counter("bes.events.processed",
 		metric.WithDescription("Total BEP events processed"),
 	)
+	eventsReparented, _ := meter.Int64Counter("bes.events.reparented",
+		metric.WithDescription("Total action/test spans reparented onto a late-arriving target span"),
+	)
 	invocationsReaped, _ := meter.Int64Counter("bes.invocations.reaped",
 		metric.WithDescription("Total invocations reaped by the stale-invocation reaper"),
 	)
@@ -115,6 +119,7 @@ func NewTraceBuilder(tracesConsumer consumer.Traces, logsConsumer consumer.Logs,
 		counters:          newCumulativeCounters(pcommon.NewTimestampFromTime(time.Now())),
 		activeInvocations: activeInvocations,
 		eventsProcessed:   eventsProcessed,
+		eventsReparented:  eventsReparented,
 		invocationsReaped: invocationsReaped,
 		consumerErrors:    consumerErrors,
 	}
@@ -367,7 +372,15 @@ func (tb *TraceBuilder) handleTargetConfigured(ctx context.Context, invocations 
 		}
 	}
 
-	state.addTarget(tc.GetLabel(), configured.GetTargetKind(), configID)
+	reparented := state.addTarget(tc.GetLabel(), configured.GetTargetKind(), configID)
+	if reparented > 0 {
+		tb.eventsReparented.Add(ctx, int64(reparented))
+		tb.logger.Debug("Reparented out-of-order spans under target",
+			zap.String("invocation_id", invocationID),
+			zap.String("label", tc.GetLabel()),
+			zap.Int("count", reparented),
+		)
+	}
 
 	tb.logger.Debug("Target configured",
 		zap.String("invocation_id", invocationID),
