@@ -24,7 +24,7 @@ func newMetricsSpanState() *invocationState {
 func metricsSpanAttrs(t *testing.T, metrics *bep.BuildMetrics) pcommon.Map {
 	t.Helper()
 	state := newMetricsSpanState()
-	traces, _ := state.buildMetricsSpan(metrics)
+	traces, _ := state.buildMetricsSpan(metrics, actionDataOptions{})
 	if traces.SpanCount() != 1 {
 		t.Fatalf("expected 1 span, got %d", traces.SpanCount())
 	}

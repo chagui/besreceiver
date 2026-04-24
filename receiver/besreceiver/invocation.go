@@ -9,6 +9,8 @@ import (
 
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/ptrace"
+	"go.uber.org/zap"
+	"google.golang.org/protobuf/types/known/durationpb"
 
 	"github.com/chagui/besreceiver/internal/bep/actioncache"
 	bep "github.com/chagui/besreceiver/internal/bep/buildeventstream"
@@ -769,11 +771,12 @@ type truncationRecord struct {
 // Used for post-flush events that arrive after the main batch is flushed.
 //
 // Sub-messages are stamped via dedicated helpers that each no-op on nil, so
-// partially-populated BuildMetrics payloads are safe. The returned
+// partially-populated BuildMetrics payloads are safe. `opts` configures the
+// per-mnemonic ActionData emission (cap, logger, invocation id). The returned
 // []truncationRecord is non-empty when one or more high-cardinality Slice[Map]
 // attributes was truncated to the configured cap; the caller is expected to
 // emit a warning log per record.
-func (s *invocationState) buildMetricsSpan(metrics *bep.BuildMetrics) (ptrace.Traces, []truncationRecord) {
+func (s *invocationState) buildMetricsSpan(metrics *bep.BuildMetrics, opts actionDataOptions) (ptrace.Traces, []truncationRecord) {
 	traces, ss := newTracesPayload()
 
 	span := ss.Spans().AppendEmpty()
@@ -786,6 +789,7 @@ func (s *invocationState) buildMetricsSpan(metrics *bep.BuildMetrics) (ptrace.Tr
 	attrs := span.Attributes()
 	stampTimingAttrs(attrs, metrics.GetTimingMetrics())
 	stampActionSummaryAttrs(attrs, metrics.GetActionSummary())
+	applyActionDataAttrs(attrs, metrics.GetActionSummary().GetActionData(), opts)
 	stampMemoryAttrs(attrs, metrics.GetMemoryMetrics())
 	stampTargetAttrs(attrs, metrics.GetTargetMetrics())
 	stampPackageAttrs(attrs, metrics.GetPackageMetrics())
@@ -1163,6 +1167,61 @@ func stampWorkerPoolAttrs(attrs pcommon.Map, wpm *bep.BuildMetrics_WorkerPoolMet
 		entry.PutInt("evicted_count", ws.GetEvictedCount())
 		entry.PutInt("alive_count", ws.GetAliveCount())
 	}
+}
+
+// actionDataOptions bundles the cap and the context needed to log truncation
+// warnings when emitting ActionData as span attributes / gauges. Threaded
+// together so the two emission paths (span attribute + gauges) truncate
+// identically and log from the same source.
+type actionDataOptions struct {
+	maxEntries   int
+	logger       *zap.Logger
+	invocationID string
+}
+
+// applyActionDataAttrs emits the per-mnemonic ActionData breakdown as a
+// Slice[Map] attribute on the bazel.metrics span. Empty input → no attribute,
+// so downstream queries can distinguish "absent" from "present but empty".
+// When len(entries) > opts.maxEntries the list is truncated to the first N
+// (Bazel already ranks by execution count at the source) and a warning log
+// carries the invocation id plus original count so operators know data was
+// dropped.
+func applyActionDataAttrs(attrs pcommon.Map, entries []*bep.BuildMetrics_ActionSummary_ActionData, opts actionDataOptions) {
+	if len(entries) == 0 {
+		return
+	}
+	limit := len(entries)
+	if opts.maxEntries > 0 && limit > opts.maxEntries {
+		limit = opts.maxEntries
+		if opts.logger != nil {
+			opts.logger.Warn("Truncating ActionData entries on bazel.metrics span",
+				zap.String("invocation_id", opts.invocationID),
+				zap.Int("original_count", len(entries)),
+				zap.Int("limit", opts.maxEntries),
+			)
+		}
+	}
+	slice := attrs.PutEmptySlice("bazel.metrics.action_data")
+	for i := range limit {
+		ad := entries[i] //nolint:gosec // G602: limit <= len(entries) by the clamp above.
+		m := slice.AppendEmpty().SetEmptyMap()
+		m.PutStr("mnemonic", ad.GetMnemonic())
+		m.PutInt("actions_executed", ad.GetActionsExecuted())
+		m.PutInt("actions_created", ad.GetActionsCreated())
+		m.PutInt("first_started_ms", ad.GetFirstStartedMs())
+		m.PutInt("last_ended_ms", ad.GetLastEndedMs())
+		m.PutInt("system_time_ms", durationToMs(ad.GetSystemTime()))
+		m.PutInt("user_time_ms", durationToMs(ad.GetUserTime()))
+	}
+}
+
+// durationToMs converts a protobuf Duration to milliseconds, mapping nil to 0.
+// Used for ActionData.system_time / user_time where Bazel may omit the field.
+func durationToMs(d *durationpb.Duration) int64 {
+	if d == nil {
+		return 0
+	}
+	return d.AsDuration().Milliseconds()
 }
 
 // flushOrphaned returns pending traces for invocations that were never finished.
