@@ -9,7 +9,19 @@ import (
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/ptrace"
 
+	"github.com/chagui/besreceiver/internal/bep/actioncache"
 	bep "github.com/chagui/besreceiver/internal/bep/buildeventstream"
+)
+
+// Cardinality caps for test-execution and action-cache attribute emission.
+// The attribute space is controlled by Bazel — caps defend against
+// pathological breakdowns / resource maps without hiding realistic data.
+const (
+	// maxTestTimingDepth bounds how deep the TimingBreakdown tree is walked.
+	// 2 = root + direct children, which covers Bazel's current shape.
+	maxTestTimingDepth = 2
+	// maxTestResourceEntries bounds per-test ResourceUsage emission.
+	maxTestResourceEntries = 20
 )
 
 // invocationState tracks the trace state for a single Bazel invocation.
@@ -264,6 +276,7 @@ func (s *invocationState) populateTestResultSpan(span ptrace.Span, parentSpanID 
 	}
 
 	span.Attributes().PutStr("bazel.test.status", result.GetStatus().String())
+	span.Attributes().PutBool("bazel.test.cached_locally", result.GetCachedLocally())
 	if label != "" {
 		span.Attributes().PutStr("bazel.target.label", label)
 	}
@@ -273,9 +286,82 @@ func (s *invocationState) populateTestResultSpan(span ptrace.Span, parentSpanID 
 		span.Attributes().PutInt("bazel.test.attempt", int64(tr.GetAttempt()))
 	}
 
+	applyTestExecutionInfo(span, result.GetExecutionInfo())
+
 	if result.GetStatus() != bep.TestStatus_PASSED {
 		span.Status().SetCode(ptrace.StatusCodeError)
 		span.Status().SetMessage(result.GetStatus().String())
+	}
+}
+
+// applyTestExecutionInfo stamps remote-execution metadata on the test span.
+// No-op on nil; bounded by maxTestTimingDepth and maxTestResourceEntries.
+func applyTestExecutionInfo(span ptrace.Span, ei *bep.TestResult_ExecutionInfo) {
+	if ei == nil {
+		return
+	}
+	if s := ei.GetStrategy(); s != "" {
+		span.Attributes().PutStr("bazel.test.execution.strategy", s)
+	}
+	span.Attributes().PutBool("bazel.test.execution.cached_remotely", ei.GetCachedRemotely())
+	if h := ei.GetHostname(); h != "" {
+		span.Attributes().PutStr("bazel.test.execution.hostname", h)
+	}
+	flattenTimingBreakdown(span, ei.GetTimingBreakdown(), 1)
+	applyResourceUsage(span, ei.GetResourceUsage())
+}
+
+// flattenTimingBreakdown walks the TimingBreakdown tree up to maxTestTimingDepth
+// and stamps each node as bazel.test.timing.<sanitized_name>_ms. Nodes with an
+// empty or duplicate sanitized name are skipped (last-write-wins would leak
+// non-determinism across backends, so we keep the first one).
+func flattenTimingBreakdown(span ptrace.Span, node *bep.TestResult_ExecutionInfo_TimingBreakdown, depth int) {
+	if node == nil || depth > maxTestTimingDepth {
+		return
+	}
+	key := sanitizeAttrKey(node.GetName())
+	if key != "" {
+		attrKey := "bazel.test.timing." + key + "_ms"
+		if _, exists := span.Attributes().Get(attrKey); !exists {
+			span.Attributes().PutInt(attrKey, timingBreakdownMs(node))
+		}
+	}
+	for _, child := range node.GetChild() {
+		flattenTimingBreakdown(span, child, depth+1)
+	}
+}
+
+// timingBreakdownMs prefers the typed Duration field over the deprecated
+// time_millis field, mirroring Bazel's preference.
+func timingBreakdownMs(node *bep.TestResult_ExecutionInfo_TimingBreakdown) int64 {
+	if d := node.GetTime(); d != nil {
+		return d.AsDuration().Milliseconds()
+	}
+	return node.GetTimeMillis() //nolint:staticcheck // SA1019: retained as fallback for Bazel releases that only populate time_millis.
+}
+
+// applyResourceUsage stamps ResourceUsage entries as bazel.test.resource.<name>,
+// preserving source order and capping at maxTestResourceEntries. Duplicates by
+// sanitized name are skipped (first wins).
+func applyResourceUsage(span ptrace.Span, usage []*bep.TestResult_ExecutionInfo_ResourceUsage) {
+	if len(usage) == 0 {
+		return
+	}
+	kept := 0
+	for _, u := range usage {
+		if kept >= maxTestResourceEntries {
+			break
+		}
+		key := sanitizeAttrKey(u.GetName())
+		if key == "" {
+			continue
+		}
+		attrKey := "bazel.test.resource." + key
+		if _, exists := span.Attributes().Get(attrKey); exists {
+			continue
+		}
+		span.Attributes().PutInt(attrKey, u.GetValue())
+		kept++
 	}
 }
 
@@ -685,9 +771,60 @@ func (s *invocationState) buildMetricsSpan(metrics *bep.BuildMetrics) ptrace.Tra
 	if as := metrics.GetActionSummary(); as != nil {
 		span.Attributes().PutInt("bazel.metrics.actions_created", as.GetActionsCreated())
 		span.Attributes().PutInt("bazel.metrics.actions_executed", as.GetActionsExecuted())
+		span.Attributes().PutInt("bazel.metrics.remote_cache_hits", as.GetRemoteCacheHits()) //nolint:staticcheck // SA1019: field deprecated upstream but still populated by current Bazel releases; issue #18 explicitly surfaces it.
+		applyActionCacheStatistics(span, as.GetActionCacheStatistics())
+		applyRunnerCounts(span, as.GetRunnerCount())
 	}
 
 	return traces
+}
+
+// applyActionCacheStatistics stamps ActionCacheStatistics onto the metrics span.
+// No-op on nil. Per-miss-reason counts are emitted as
+// bazel.metrics.action_cache.miss.<reason_lowercased>; only reasons present in
+// the payload are emitted (up to 8 enum values per Bazel spec).
+func applyActionCacheStatistics(span ptrace.Span, acs *actioncache.ActionCacheStatistics) {
+	if acs == nil {
+		return
+	}
+	span.Attributes().PutInt("bazel.metrics.action_cache.hits", int64(acs.GetHits()))
+	span.Attributes().PutInt("bazel.metrics.action_cache.misses", int64(acs.GetMisses()))
+	// SizeInBytes / LoadTimeInMs / SaveTimeInMs are uint64 in the proto; in
+	// practice they fit comfortably in int64 (total build cache size, not a
+	// cumulative throughput counter). Cast is intentional.
+	span.Attributes().PutInt("bazel.metrics.action_cache.size_bytes", int64(acs.GetSizeInBytes()))    //nolint:gosec // G115: uint64 cache size within int64 range for all realistic builds.
+	span.Attributes().PutInt("bazel.metrics.action_cache.load_time_ms", int64(acs.GetLoadTimeInMs())) //nolint:gosec // G115: uint64 load time within int64 range for all realistic builds.
+	span.Attributes().PutInt("bazel.metrics.action_cache.save_time_ms", int64(acs.GetSaveTimeInMs())) //nolint:gosec // G115: uint64 save time within int64 range for all realistic builds.
+
+	for _, md := range acs.GetMissDetails() {
+		if md == nil {
+			continue
+		}
+		reason := strings.ToLower(md.GetReason().String())
+		if reason == "" {
+			continue
+		}
+		span.Attributes().PutInt("bazel.metrics.action_cache.miss."+reason, int64(md.GetCount()))
+	}
+}
+
+// applyRunnerCounts emits bazel.metrics.runners as a slice of maps, one per
+// RunnerCount entry. Order mirrors the payload; empty slice yields an empty
+// attribute so downstream queries can assert presence without a special case.
+func applyRunnerCounts(span ptrace.Span, runners []*bep.BuildMetrics_ActionSummary_RunnerCount) {
+	if len(runners) == 0 {
+		return
+	}
+	slice := span.Attributes().PutEmptySlice("bazel.metrics.runners")
+	for _, rc := range runners {
+		if rc == nil {
+			continue
+		}
+		entry := slice.AppendEmpty().SetEmptyMap()
+		entry.PutStr("name", rc.GetName())
+		entry.PutInt("count", int64(rc.GetCount()))
+		entry.PutStr("exec_kind", rc.GetExecKind())
+	}
 }
 
 // flushOrphaned returns pending traces for invocations that were never finished.
