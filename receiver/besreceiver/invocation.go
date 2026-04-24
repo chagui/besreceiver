@@ -100,9 +100,13 @@ type invocationState struct {
 
 	// pii opts specific BEP fields into span emission; see PIIConfig.
 	pii PIIConfig
+
+	// caps bounds the size of Slice[Map] attributes emitted on the
+	// bazel.metrics span for high-cardinality BuildMetrics sub-messages.
+	caps HighCardinalityCaps
 }
 
-func newInvocationState(traceID pcommon.TraceID, rootSpanID pcommon.SpanID, started *bep.BuildStarted, now time.Time, pii PIIConfig) *invocationState {
+func newInvocationState(traceID pcommon.TraceID, rootSpanID pcommon.SpanID, started *bep.BuildStarted, now time.Time, pii PIIConfig, caps HighCardinalityCaps) *invocationState {
 	traces, ss := newTracesPayload()
 	return &invocationState{
 		traceID:       traceID,
@@ -114,6 +118,7 @@ func newInvocationState(traceID pcommon.TraceID, rootSpanID pcommon.SpanID, star
 		pendingTraces: traces,
 		scopeSpans:    ss,
 		pii:           pii,
+		caps:          caps,
 	}
 }
 
@@ -751,15 +756,24 @@ func (s *invocationState) lateTestResultSpan(label, configID string, tr *bep.Bui
 	return traces
 }
 
+// truncationRecord describes one high-cardinality list that exceeded its
+// configured cap. Emitted by buildMetricsSpan so callers can log a warning
+// with invocation context.
+type truncationRecord struct {
+	attribute string
+	original  int
+	kept      int
+}
+
 // buildMetricsSpan creates a standalone Traces payload for BuildMetrics.
 // Used for post-flush events that arrive after the main batch is flushed.
 //
 // Sub-messages are stamped via dedicated helpers that each no-op on nil, so
-// partially-populated BuildMetrics payloads are safe. High-cardinality sub-
-// messages (GarbageMetrics, PackageLoadMetrics, WorkerMetrics, EvaluationStat,
-// RuleClassCount, AspectCount, RemoteAnalysisCacheStatistics) are intentionally
-// skipped; see issue #25 / #29 for rationale.
-func (s *invocationState) buildMetricsSpan(metrics *bep.BuildMetrics) ptrace.Traces {
+// partially-populated BuildMetrics payloads are safe. The returned
+// []truncationRecord is non-empty when one or more high-cardinality Slice[Map]
+// attributes was truncated to the configured cap; the caller is expected to
+// emit a warning log per record.
+func (s *invocationState) buildMetricsSpan(metrics *bep.BuildMetrics) (ptrace.Traces, []truncationRecord) {
 	traces, ss := newTracesPayload()
 
 	span := ss.Spans().AppendEmpty()
@@ -782,7 +796,137 @@ func (s *invocationState) buildMetricsSpan(metrics *bep.BuildMetrics) ptrace.Tra
 	stampDynamicExecutionAttrs(attrs, metrics.GetDynamicExecutionMetrics())
 	stampWorkerPoolAttrs(attrs, metrics.GetWorkerPoolMetrics())
 
-	return traces
+	caps := s.caps.withDefaults()
+	var truncs []truncationRecord
+	truncs = appendGarbageMetrics(span, metrics.GetMemoryMetrics(), caps.Garbage, truncs)
+	truncs = appendPackageLoadMetrics(span, metrics.GetPackageMetrics(), caps.PackageLoad, truncs)
+	truncs = appendGraphMetrics(span, metrics.GetBuildGraphMetrics(), caps.GraphValues, truncs)
+
+	return traces, truncs
+}
+
+// appendGarbageMetrics emits bazel.metrics.garbage as a Slice[Map] from
+// MemoryMetrics.garbage_metrics. Empty/nil lists are skipped (no attribute).
+// Entries beyond cap are dropped and one truncationRecord is appended.
+func appendGarbageMetrics(span ptrace.Span, mm *bep.BuildMetrics_MemoryMetrics, limit int, truncs []truncationRecord) []truncationRecord {
+	if mm == nil {
+		return truncs
+	}
+	entries := mm.GetGarbageMetrics()
+	if len(entries) == 0 {
+		return truncs
+	}
+	original := len(entries)
+	kept := original
+	if limit > 0 && original > limit {
+		entries = entries[:limit]
+		kept = limit
+	}
+	slice := span.Attributes().PutEmptySlice("bazel.metrics.garbage")
+	for _, g := range entries {
+		m := slice.AppendEmpty().SetEmptyMap()
+		m.PutStr("type", g.GetType())
+		m.PutInt("garbage_collected_bytes", g.GetGarbageCollected())
+	}
+	if kept < original {
+		truncs = append(truncs, truncationRecord{
+			attribute: "bazel.metrics.garbage",
+			original:  original,
+			kept:      kept,
+		})
+	}
+	return truncs
+}
+
+// appendPackageLoadMetrics emits bazel.metrics.package_load as a Slice[Map]
+// from PackageMetrics.package_load_metrics. Durations are normalized to
+// milliseconds.
+func appendPackageLoadMetrics(span ptrace.Span, pm *bep.BuildMetrics_PackageMetrics, limit int, truncs []truncationRecord) []truncationRecord {
+	if pm == nil {
+		return truncs
+	}
+	entries := pm.GetPackageLoadMetrics()
+	if len(entries) == 0 {
+		return truncs
+	}
+	original := len(entries)
+	kept := original
+	if limit > 0 && original > limit {
+		entries = entries[:limit]
+		kept = limit
+	}
+	slice := span.Attributes().PutEmptySlice("bazel.metrics.package_load")
+	for _, p := range entries {
+		m := slice.AppendEmpty().SetEmptyMap()
+		m.PutStr("name", p.GetName())
+		// LoadDuration is a google.protobuf.Duration — convert to ms to match
+		// sibling attributes like bazel.metrics.wall_time_ms. Missing duration
+		// renders as 0 via the generated getter.
+		if d := p.GetLoadDuration(); d != nil {
+			m.PutInt("load_duration_ms", d.AsDuration().Milliseconds())
+		} else {
+			m.PutInt("load_duration_ms", 0)
+		}
+		m.PutInt("num_targets", int64(p.GetNumTargets()))                                     //nolint:gosec // G115: per-package target count within int64 range for all realistic packages.
+		m.PutInt("computation_steps", int64(p.GetComputationSteps()))                         //nolint:gosec // G115: per-package computation steps within int64 range for all realistic packages.
+		m.PutInt("num_transitive_loads", int64(p.GetNumTransitiveLoads()))                    //nolint:gosec // G115: per-package transitive load count within int64 range for all realistic packages.
+		m.PutInt("package_overhead", int64(p.GetPackageOverhead()))                           //nolint:gosec // G115: per-package overhead within int64 range for all realistic packages.
+		m.PutInt("glob_filesystem_operation_cost", int64(p.GetGlobFilesystemOperationCost())) //nolint:gosec // G115: per-package glob cost within int64 range for all realistic packages.
+	}
+	if kept < original {
+		truncs = append(truncs, truncationRecord{
+			attribute: "bazel.metrics.package_load",
+			original:  original,
+			kept:      kept,
+		})
+	}
+	return truncs
+}
+
+// appendGraphMetrics emits the five bazel.metrics.graph.*_values Slice[Map]
+// attributes. Each applies the same cap independently.
+func appendGraphMetrics(span ptrace.Span, bgm *bep.BuildMetrics_BuildGraphMetrics, limit int, truncs []truncationRecord) []truncationRecord {
+	if bgm == nil {
+		return truncs
+	}
+	categories := []struct {
+		attr    string
+		entries []*bep.BuildMetrics_EvaluationStat
+	}{
+		{"bazel.metrics.graph.dirtied_values", bgm.GetDirtiedValues()},
+		{"bazel.metrics.graph.changed_values", bgm.GetChangedValues()},
+		{"bazel.metrics.graph.built_values", bgm.GetBuiltValues()},
+		{"bazel.metrics.graph.cleaned_values", bgm.GetCleanedValues()},
+		{"bazel.metrics.graph.evaluated_values", bgm.GetEvaluatedValues()},
+	}
+	for _, c := range categories {
+		if len(c.entries) == 0 {
+			continue
+		}
+		original := len(c.entries)
+		kept := original
+		entries := c.entries
+		if limit > 0 && original > limit {
+			entries = entries[:limit]
+			kept = limit
+		}
+		slice := span.Attributes().PutEmptySlice(c.attr)
+		for _, e := range entries {
+			m := slice.AppendEmpty().SetEmptyMap()
+			// Issue #29 attribute keys: "skyfunction" (not the proto's
+			// skyfunction_name) for backend-agnostic query ergonomics.
+			m.PutStr("skyfunction", e.GetSkyfunctionName())
+			m.PutInt("count", e.GetCount())
+		}
+		if kept < original {
+			truncs = append(truncs, truncationRecord{
+				attribute: c.attr,
+				original:  original,
+				kept:      kept,
+			})
+		}
+	}
+	return truncs
 }
 
 // maxBuildMetricsSliceEntries caps slice-of-map span attributes (DynamicExecutionMetrics,

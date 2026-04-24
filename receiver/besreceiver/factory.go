@@ -38,9 +38,10 @@ func createDefaultConfig() component.Config {
 				Transport: confignet.TransportTypeTCP,
 			},
 		},
-		InvocationTimeout: defaultInvocationTimeout,
-		ReaperInterval:    defaultReaperInterval,
-		PII:               PIIConfig{},
+		InvocationTimeout:   defaultInvocationTimeout,
+		ReaperInterval:      defaultReaperInterval,
+		PII:                 PIIConfig{},
+		HighCardinalityCaps: defaultHighCardinalityCaps(),
 	}
 }
 

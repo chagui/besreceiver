@@ -342,7 +342,7 @@ func TestBuildMetricsSpan_NilActionCacheStatistics(t *testing.T) {
 		},
 	}
 
-	traces := state.buildMetricsSpan(metrics)
+	traces, _ := state.buildMetricsSpan(metrics)
 	require.Equal(t, 1, traces.SpanCount())
 	span := traces.ResourceSpans().At(0).ScopeSpans().At(0).Spans().At(0)
 	assert.Equal(t, "bazel.metrics", span.Name())
@@ -372,7 +372,7 @@ func TestBuildMetricsSpan_NilActionSummary(t *testing.T) {
 	}
 	metrics := &bep.BuildMetrics{} // all sub-messages nil
 
-	traces := state.buildMetricsSpan(metrics)
+	traces, _ := state.buildMetricsSpan(metrics)
 	require.Equal(t, 1, traces.SpanCount())
 	span := traces.ResourceSpans().At(0).ScopeSpans().At(0).Spans().At(0)
 
@@ -408,7 +408,7 @@ func TestBuildMetricsSpan_ActionCacheStatistics(t *testing.T) {
 		},
 	}
 
-	traces := state.buildMetricsSpan(metrics)
+	traces, _ := state.buildMetricsSpan(metrics)
 	span := traces.ResourceSpans().At(0).ScopeSpans().At(0).Spans().At(0)
 
 	hits, ok := span.Attributes().Get("bazel.metrics.action_cache.hits")
@@ -479,7 +479,7 @@ func TestBuildMetricsSpan_ActionCacheStatistics_AllEightMissReasons(t *testing.T
 		},
 	}
 
-	traces := state.buildMetricsSpan(metrics)
+	traces, _ := state.buildMetricsSpan(metrics)
 	span := traces.ResourceSpans().At(0).ScopeSpans().At(0).Spans().At(0)
 
 	for i, r := range reasons {
@@ -521,7 +521,7 @@ func TestBuildMetricsSpan_Runners(t *testing.T) {
 		},
 	}
 
-	traces := state.buildMetricsSpan(metrics)
+	traces, _ := state.buildMetricsSpan(metrics)
 	span := traces.ResourceSpans().At(0).ScopeSpans().At(0).Spans().At(0)
 
 	runners, ok := span.Attributes().Get("bazel.metrics.runners")
@@ -558,7 +558,7 @@ func TestBuildMetricsSpan_Runners_Empty(t *testing.T) {
 		},
 	}
 
-	traces := state.buildMetricsSpan(metrics)
+	traces, _ := state.buildMetricsSpan(metrics)
 	span := traces.ResourceSpans().At(0).ScopeSpans().At(0).Spans().At(0)
 
 	// No bazel.metrics.runners attribute emitted when there are no runners.
