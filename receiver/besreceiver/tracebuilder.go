@@ -327,6 +327,11 @@ func (tb *TraceBuilder) processEvent(ctx context.Context, invocations map[string
 			return nil
 		}
 		return tb.handleTargetComplete(ctx, invocations, invocationID, event.GetId(), p.Completed)
+	case *bep.BuildEvent_Expanded:
+		if p.Expanded == nil {
+			return nil
+		}
+		return tb.handlePatternExpanded(ctx, invocations, invocationID, event)
 	case *bep.BuildEvent_TestSummary:
 		if p.TestSummary == nil {
 			return nil
@@ -390,6 +395,8 @@ func eventTypeName(event *bep.BuildEvent) string {
 		return "exec_request"
 	case *bep.BuildEvent_Fetch:
 		return "fetch"
+	case *bep.BuildEvent_Expanded:
+		return "pattern_expanded"
 	default:
 		return "other"
 	}
@@ -575,9 +582,17 @@ func (tb *TraceBuilder) handleBuildFinished(ctx context.Context, invocations map
 		return nil
 	}
 
-	traces, ok := state.finalize(finished)
+	traces, truncs, ok := state.finalize(finished)
 	if !ok {
 		return nil
+	}
+	for _, tr := range truncs {
+		tb.logger.Warn("Truncated high-cardinality root-span attribute",
+			zap.String("invocation_id", invocationID),
+			zap.String("attribute", tr.attribute),
+			zap.Int("original_count", tr.original),
+			zap.Int("kept", tr.kept),
+		)
 	}
 
 	tb.logger.Debug("Build finished",
@@ -661,6 +676,29 @@ func (tb *TraceBuilder) handleWorkspaceStatus(_ context.Context, invocations map
 	tb.logger.Debug("Workspace status received",
 		zap.String("invocation_id", invocationID),
 		zap.Int("items", len(ws.GetItem())),
+	)
+	return nil
+}
+
+// handlePatternExpanded aggregates a PatternExpanded event onto the
+// invocation state for later emission as bazel.patterns on the root span.
+// Pattern strings come from BuildEventId.pattern.pattern (repeated); the
+// target count is the number of children on the event — each child is a
+// target/pattern the expansion resolved to. Empty pattern lists and zero-
+// target expansions are dropped. Post-flush arrivals are ignored (matches
+// the buffering semantics of workspace_status / build_metadata).
+func (tb *TraceBuilder) handlePatternExpanded(_ context.Context, invocations map[string]*invocationState, invocationID string, event *bep.BuildEvent) error {
+	state := invocations[invocationID]
+	if state == nil {
+		return nil
+	}
+	patterns := event.GetId().GetPattern().GetPattern()
+	targetCount := int64(len(event.GetChildren()))
+	state.addPatternExpanded(patterns, targetCount)
+	tb.logger.Debug("Pattern expanded",
+		zap.String("invocation_id", invocationID),
+		zap.Int("patterns", len(patterns)),
+		zap.Int64("target_count", targetCount),
 	)
 	return nil
 }
@@ -1117,7 +1155,15 @@ func (tb *TraceBuilder) reapStale(invocations map[string]*invocationState, now t
 		if now.Sub(state.createdAt) <= tb.invocationTimeout {
 			continue
 		}
-		if traces, ok := state.flushOrphaned(); ok && tb.tracesConsumer != nil {
+		if traces, truncs, ok := state.flushOrphaned(); ok && tb.tracesConsumer != nil {
+			for _, tr := range truncs {
+				tb.logger.Warn("Truncated high-cardinality root-span attribute",
+					zap.String("invocation_id", invID),
+					zap.String("attribute", tr.attribute),
+					zap.Int("original_count", tr.original),
+					zap.Int("kept", tr.kept),
+				)
+			}
 			if err := tb.tracesConsumer.ConsumeTraces(context.Background(), traces); err != nil {
 				tb.logger.Error("Failed to flush orphaned spans",
 					zap.String("invocation_id", invID),
