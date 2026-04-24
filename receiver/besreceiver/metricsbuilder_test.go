@@ -81,21 +81,23 @@ func TestBuildInvocationMetrics_ActionSummary(t *testing.T) {
 	}
 	metrics := &bep.BuildMetrics{
 		ActionSummary: &bep.BuildMetrics_ActionSummary{
-			ActionsCreated:  500,
-			ActionsExecuted: 42,
+			ActionsCreated:                    500,
+			ActionsCreatedNotIncludingAspects: 480,
+			ActionsExecuted:                   42,
 		},
 	}
 
 	md := buildInvocationGauges("inv-2", state, metrics, ts)
 
-	if md.MetricCount() != 2 {
-		t.Fatalf("expected 2 metrics, got %d", md.MetricCount())
+	if md.MetricCount() != 3 {
+		t.Fatalf("expected 3 metrics, got %d", md.MetricCount())
 	}
 
 	sm := md.ResourceMetrics().At(0).ScopeMetrics().At(0)
 	wantGauges := map[string]int64{
-		"bazel.invocation.actions_created":  500,
-		"bazel.invocation.actions_executed": 42,
+		"bazel.invocation.actions_created":                       500,
+		"bazel.invocation.actions_created_not_including_aspects": 480,
+		"bazel.invocation.actions_executed":                      42,
 	}
 
 	for i := range sm.Metrics().Len() {
@@ -336,8 +338,8 @@ func TestBuildInvocationMetrics_AllCategories(t *testing.T) {
 
 	md := buildInvocationGauges("inv-all", state, metrics, ts)
 
-	// 5 timing (no CriticalPathTime since it's nil) + 2 action + 2 memory = 9.
-	if md.MetricCount() != 9 {
-		t.Fatalf("expected 9 metrics, got %d", md.MetricCount())
+	// 5 timing (no CriticalPathTime since it's nil) + 3 action + 2 memory = 10.
+	if md.MetricCount() != 10 {
+		t.Fatalf("expected 10 metrics, got %d", md.MetricCount())
 	}
 }
