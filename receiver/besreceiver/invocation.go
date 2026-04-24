@@ -1,6 +1,7 @@
 package besreceiver
 
 import (
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -752,6 +753,12 @@ func (s *invocationState) lateTestResultSpan(label, configID string, tr *bep.Bui
 
 // buildMetricsSpan creates a standalone Traces payload for BuildMetrics.
 // Used for post-flush events that arrive after the main batch is flushed.
+//
+// Sub-messages are stamped via dedicated helpers that each no-op on nil, so
+// partially-populated BuildMetrics payloads are safe. High-cardinality sub-
+// messages (GarbageMetrics, PackageLoadMetrics, WorkerMetrics, EvaluationStat,
+// RuleClassCount, AspectCount, RemoteAnalysisCacheStatistics) are intentionally
+// skipped; see issue #25 / #29 for rationale.
 func (s *invocationState) buildMetricsSpan(metrics *bep.BuildMetrics) ptrace.Traces {
 	traces, ss := newTracesPayload()
 
@@ -762,39 +769,73 @@ func (s *invocationState) buildMetricsSpan(metrics *bep.BuildMetrics) ptrace.Tra
 	span.SetName("bazel.metrics")
 	span.SetKind(ptrace.SpanKindInternal)
 
-	if tm := metrics.GetTimingMetrics(); tm != nil {
-		span.Attributes().PutInt("bazel.metrics.wall_time_ms", tm.GetWallTimeInMs())
-		span.Attributes().PutInt("bazel.metrics.cpu_time_ms", tm.GetCpuTimeInMs())
-		span.Attributes().PutInt("bazel.metrics.analysis_phase_time_ms", tm.GetAnalysisPhaseTimeInMs())
-		span.Attributes().PutInt("bazel.metrics.execution_phase_time_ms", tm.GetExecutionPhaseTimeInMs())
-	}
-	if as := metrics.GetActionSummary(); as != nil {
-		span.Attributes().PutInt("bazel.metrics.actions_created", as.GetActionsCreated())
-		span.Attributes().PutInt("bazel.metrics.actions_executed", as.GetActionsExecuted())
-		span.Attributes().PutInt("bazel.metrics.remote_cache_hits", as.GetRemoteCacheHits()) //nolint:staticcheck // SA1019: field deprecated upstream but still populated by current Bazel releases; issue #18 explicitly surfaces it.
-		applyActionCacheStatistics(span, as.GetActionCacheStatistics())
-		applyRunnerCounts(span, as.GetRunnerCount())
-	}
+	attrs := span.Attributes()
+	stampTimingAttrs(attrs, metrics.GetTimingMetrics())
+	stampActionSummaryAttrs(attrs, metrics.GetActionSummary())
+	stampMemoryAttrs(attrs, metrics.GetMemoryMetrics())
+	stampTargetAttrs(attrs, metrics.GetTargetMetrics())
+	stampPackageAttrs(attrs, metrics.GetPackageMetrics())
+	stampBuildGraphAttrs(attrs, metrics.GetBuildGraphMetrics())
+	stampArtifactAttrs(attrs, metrics.GetArtifactMetrics())
+	stampNetworkAttrs(attrs, metrics.GetNetworkMetrics())
+	stampCumulativeAttrs(attrs, metrics.GetCumulativeMetrics())
+	stampDynamicExecutionAttrs(attrs, metrics.GetDynamicExecutionMetrics())
+	stampWorkerPoolAttrs(attrs, metrics.GetWorkerPoolMetrics())
 
 	return traces
+}
+
+// maxBuildMetricsSliceEntries caps slice-of-map span attributes (DynamicExecutionMetrics,
+// WorkerPoolMetrics). Bazel can emit one entry per mnemonic; 20 is enough to capture
+// the common case without unbounded cardinality blowing up trace backends.
+const maxBuildMetricsSliceEntries = 20
+
+// stampTimingAttrs writes wall/cpu/phase timings plus the additional critical-path
+// and actions-execution-start fields added in issue #25.
+func stampTimingAttrs(attrs pcommon.Map, tm *bep.BuildMetrics_TimingMetrics) {
+	if tm == nil {
+		return
+	}
+	attrs.PutInt("bazel.metrics.wall_time_ms", tm.GetWallTimeInMs())
+	attrs.PutInt("bazel.metrics.cpu_time_ms", tm.GetCpuTimeInMs())
+	attrs.PutInt("bazel.metrics.analysis_phase_time_ms", tm.GetAnalysisPhaseTimeInMs())
+	attrs.PutInt("bazel.metrics.execution_phase_time_ms", tm.GetExecutionPhaseTimeInMs())
+	attrs.PutInt("bazel.metrics.actions_execution_start_ms", tm.GetActionsExecutionStartInMs())
+	if cpt := tm.GetCriticalPathTime(); cpt != nil {
+		attrs.PutInt("bazel.metrics.critical_path_time_ms", cpt.AsDuration().Milliseconds())
+	}
+}
+
+// stampActionSummaryAttrs writes the scalar totals plus the remote-cache /
+// action-cache / runner-count enrichment established by issue #18.
+func stampActionSummaryAttrs(attrs pcommon.Map, as *bep.BuildMetrics_ActionSummary) {
+	if as == nil {
+		return
+	}
+	attrs.PutInt("bazel.metrics.actions_created", as.GetActionsCreated())
+	attrs.PutInt("bazel.metrics.actions_created_not_including_aspects", as.GetActionsCreatedNotIncludingAspects())
+	attrs.PutInt("bazel.metrics.actions_executed", as.GetActionsExecuted())
+	attrs.PutInt("bazel.metrics.remote_cache_hits", as.GetRemoteCacheHits()) //nolint:staticcheck // SA1019: field deprecated upstream but still populated by current Bazel releases; issue #18 explicitly surfaces it.
+	applyActionCacheStatistics(attrs, as.GetActionCacheStatistics())
+	applyRunnerCounts(attrs, as.GetRunnerCount())
 }
 
 // applyActionCacheStatistics stamps ActionCacheStatistics onto the metrics span.
 // No-op on nil. Per-miss-reason counts are emitted as
 // bazel.metrics.action_cache.miss.<reason_lowercased>; only reasons present in
 // the payload are emitted (up to 8 enum values per Bazel spec).
-func applyActionCacheStatistics(span ptrace.Span, acs *actioncache.ActionCacheStatistics) {
+func applyActionCacheStatistics(attrs pcommon.Map, acs *actioncache.ActionCacheStatistics) {
 	if acs == nil {
 		return
 	}
-	span.Attributes().PutInt("bazel.metrics.action_cache.hits", int64(acs.GetHits()))
-	span.Attributes().PutInt("bazel.metrics.action_cache.misses", int64(acs.GetMisses()))
+	attrs.PutInt("bazel.metrics.action_cache.hits", int64(acs.GetHits()))
+	attrs.PutInt("bazel.metrics.action_cache.misses", int64(acs.GetMisses()))
 	// SizeInBytes / LoadTimeInMs / SaveTimeInMs are uint64 in the proto; in
 	// practice they fit comfortably in int64 (total build cache size, not a
 	// cumulative throughput counter). Cast is intentional.
-	span.Attributes().PutInt("bazel.metrics.action_cache.size_bytes", int64(acs.GetSizeInBytes()))    //nolint:gosec // G115: uint64 cache size within int64 range for all realistic builds.
-	span.Attributes().PutInt("bazel.metrics.action_cache.load_time_ms", int64(acs.GetLoadTimeInMs())) //nolint:gosec // G115: uint64 load time within int64 range for all realistic builds.
-	span.Attributes().PutInt("bazel.metrics.action_cache.save_time_ms", int64(acs.GetSaveTimeInMs())) //nolint:gosec // G115: uint64 save time within int64 range for all realistic builds.
+	attrs.PutInt("bazel.metrics.action_cache.size_bytes", int64(acs.GetSizeInBytes()))    //nolint:gosec // G115: uint64 cache size within int64 range for all realistic builds.
+	attrs.PutInt("bazel.metrics.action_cache.load_time_ms", int64(acs.GetLoadTimeInMs())) //nolint:gosec // G115: uint64 load time within int64 range for all realistic builds.
+	attrs.PutInt("bazel.metrics.action_cache.save_time_ms", int64(acs.GetSaveTimeInMs())) //nolint:gosec // G115: uint64 save time within int64 range for all realistic builds.
 
 	for _, md := range acs.GetMissDetails() {
 		if md == nil {
@@ -804,18 +845,17 @@ func applyActionCacheStatistics(span ptrace.Span, acs *actioncache.ActionCacheSt
 		if reason == "" {
 			continue
 		}
-		span.Attributes().PutInt("bazel.metrics.action_cache.miss."+reason, int64(md.GetCount()))
+		attrs.PutInt("bazel.metrics.action_cache.miss."+reason, int64(md.GetCount()))
 	}
 }
 
 // applyRunnerCounts emits bazel.metrics.runners as a slice of maps, one per
-// RunnerCount entry. Order mirrors the payload; empty slice yields an empty
-// attribute so downstream queries can assert presence without a special case.
-func applyRunnerCounts(span ptrace.Span, runners []*bep.BuildMetrics_ActionSummary_RunnerCount) {
+// RunnerCount entry. Order mirrors the payload.
+func applyRunnerCounts(attrs pcommon.Map, runners []*bep.BuildMetrics_ActionSummary_RunnerCount) {
 	if len(runners) == 0 {
 		return
 	}
-	slice := span.Attributes().PutEmptySlice("bazel.metrics.runners")
+	slice := attrs.PutEmptySlice("bazel.metrics.runners")
 	for _, rc := range runners {
 		if rc == nil {
 			continue
@@ -824,6 +864,160 @@ func applyRunnerCounts(span ptrace.Span, runners []*bep.BuildMetrics_ActionSumma
 		entry.PutStr("name", rc.GetName())
 		entry.PutInt("count", int64(rc.GetCount()))
 		entry.PutStr("exec_kind", rc.GetExecKind())
+	}
+}
+
+func stampMemoryAttrs(attrs pcommon.Map, mm *bep.BuildMetrics_MemoryMetrics) {
+	if mm == nil {
+		return
+	}
+	attrs.PutInt("bazel.metrics.memory.used_heap_size_post_build", mm.GetUsedHeapSizePostBuild())
+	attrs.PutInt("bazel.metrics.memory.peak_post_gc_heap_size", mm.GetPeakPostGcHeapSize())
+	attrs.PutInt("bazel.metrics.memory.peak_post_gc_tenured_space_heap_size", mm.GetPeakPostGcTenuredSpaceHeapSize())
+}
+
+// stampTargetAttrs omits the deprecated targets_loaded field — it never measured
+// what the proto comment claims. See build_event_stream.proto:1011-1015.
+func stampTargetAttrs(attrs pcommon.Map, tm *bep.BuildMetrics_TargetMetrics) {
+	if tm == nil {
+		return
+	}
+	attrs.PutInt("bazel.metrics.targets_configured", tm.GetTargetsConfigured())
+	attrs.PutInt("bazel.metrics.targets_configured_not_including_aspects", tm.GetTargetsConfiguredNotIncludingAspects())
+}
+
+func stampPackageAttrs(attrs pcommon.Map, pm *bep.BuildMetrics_PackageMetrics) {
+	if pm == nil {
+		return
+	}
+	attrs.PutInt("bazel.metrics.packages_loaded", pm.GetPackagesLoaded())
+}
+
+func stampBuildGraphAttrs(attrs pcommon.Map, bgm *bep.BuildMetrics_BuildGraphMetrics) {
+	if bgm == nil {
+		return
+	}
+	attrs.PutInt("bazel.metrics.graph.action_lookup_value_count", int64(bgm.GetActionLookupValueCount()))
+	attrs.PutInt("bazel.metrics.graph.action_lookup_value_count_not_including_aspects", int64(bgm.GetActionLookupValueCountNotIncludingAspects()))
+	attrs.PutInt("bazel.metrics.graph.action_count", int64(bgm.GetActionCount()))
+	attrs.PutInt("bazel.metrics.graph.action_count_not_including_aspects", int64(bgm.GetActionCountNotIncludingAspects()))
+	attrs.PutInt("bazel.metrics.graph.input_file_configured_target_count", int64(bgm.GetInputFileConfiguredTargetCount()))
+	attrs.PutInt("bazel.metrics.graph.output_file_configured_target_count", int64(bgm.GetOutputFileConfiguredTargetCount()))
+	attrs.PutInt("bazel.metrics.graph.other_configured_target_count", int64(bgm.GetOtherConfiguredTargetCount()))
+	attrs.PutInt("bazel.metrics.graph.output_artifact_count", int64(bgm.GetOutputArtifactCount()))
+	attrs.PutInt("bazel.metrics.graph.post_invocation_skyframe_node_count", int64(bgm.GetPostInvocationSkyframeNodeCount()))
+}
+
+// stampArtifactAttrs emits one count + one size attr per artifact category. A nil
+// FilesMetric leaves the pair unset — common for categories Bazel didn't populate
+// (e.g. top-level artifacts without --output_groups).
+func stampArtifactAttrs(attrs pcommon.Map, am *bep.BuildMetrics_ArtifactMetrics) {
+	if am == nil {
+		return
+	}
+	stampFilesMetric(attrs, "bazel.metrics.artifacts.source_read", am.GetSourceArtifactsRead())
+	stampFilesMetric(attrs, "bazel.metrics.artifacts.output", am.GetOutputArtifactsSeen())
+	stampFilesMetric(attrs, "bazel.metrics.artifacts.from_action_cache", am.GetOutputArtifactsFromActionCache())
+	stampFilesMetric(attrs, "bazel.metrics.artifacts.top_level", am.GetTopLevelArtifacts())
+}
+
+func stampFilesMetric(attrs pcommon.Map, prefix string, fm *bep.BuildMetrics_ArtifactMetrics_FilesMetric) {
+	if fm == nil {
+		return
+	}
+	attrs.PutInt(prefix+"_count", int64(fm.GetCount()))
+	attrs.PutInt(prefix+"_bytes", fm.GetSizeInBytes())
+}
+
+// stampNetworkAttrs reaches into the SystemNetworkStats sub-message for the 8
+// throughput + peak fields. NetworkMetrics itself being non-nil but
+// SystemNetworkStats nil is treated as "no network data collected". The proto
+// exposes uint64 counters; saturateUint64 avoids flipping them negative on the
+// (implausible but possible) overflow into int64.
+func stampNetworkAttrs(attrs pcommon.Map, nm *bep.BuildMetrics_NetworkMetrics) {
+	if nm == nil {
+		return
+	}
+	stats := nm.GetSystemNetworkStats()
+	if stats == nil {
+		return
+	}
+	attrs.PutInt("bazel.metrics.network.bytes_sent", saturateUint64(stats.GetBytesSent()))
+	attrs.PutInt("bazel.metrics.network.bytes_recv", saturateUint64(stats.GetBytesRecv()))
+	attrs.PutInt("bazel.metrics.network.packets_sent", saturateUint64(stats.GetPacketsSent()))
+	attrs.PutInt("bazel.metrics.network.packets_recv", saturateUint64(stats.GetPacketsRecv()))
+	attrs.PutInt("bazel.metrics.network.peak_bytes_sent_per_sec", saturateUint64(stats.GetPeakBytesSentPerSec()))
+	attrs.PutInt("bazel.metrics.network.peak_bytes_recv_per_sec", saturateUint64(stats.GetPeakBytesRecvPerSec()))
+	attrs.PutInt("bazel.metrics.network.peak_packets_sent_per_sec", saturateUint64(stats.GetPeakPacketsSentPerSec()))
+	attrs.PutInt("bazel.metrics.network.peak_packets_recv_per_sec", saturateUint64(stats.GetPeakPacketsRecvPerSec()))
+}
+
+// saturateUint64 clamps a uint64 to math.MaxInt64 so we never emit a negative
+// "count" to metric backends. Real network counters should never approach this
+// boundary during a single invocation, but the conversion is worth making
+// explicit.
+func saturateUint64(v uint64) int64 {
+	if v > uint64(math.MaxInt64) {
+		return math.MaxInt64
+	}
+	return int64(v)
+}
+
+func stampCumulativeAttrs(attrs pcommon.Map, cm *bep.BuildMetrics_CumulativeMetrics) {
+	if cm == nil {
+		return
+	}
+	attrs.PutInt("bazel.metrics.cumulative.num_analyses", int64(cm.GetNumAnalyses()))
+	attrs.PutInt("bazel.metrics.cumulative.num_builds", int64(cm.GetNumBuilds()))
+}
+
+// stampDynamicExecutionAttrs emits a slice-of-map attribute so each mnemonic's
+// race outcome stays together. Capped at maxBuildMetricsSliceEntries to bound
+// attribute payload size even if Bazel emits one entry per mnemonic in a large
+// workspace.
+func stampDynamicExecutionAttrs(attrs pcommon.Map, dem *bep.BuildMetrics_DynamicExecutionMetrics) {
+	if dem == nil {
+		return
+	}
+	stats := dem.GetRaceStatistics()
+	if len(stats) == 0 {
+		return
+	}
+	slice := attrs.PutEmptySlice("bazel.metrics.dynamic_execution")
+	for i, rs := range stats {
+		if i >= maxBuildMetricsSliceEntries {
+			break
+		}
+		entry := slice.AppendEmpty().SetEmptyMap()
+		entry.PutStr("mnemonic", rs.GetMnemonic())
+		entry.PutStr("local_runner", rs.GetLocalRunner())
+		entry.PutStr("remote_runner", rs.GetRemoteRunner())
+		entry.PutInt("local_wins", int64(rs.GetLocalWins()))
+		entry.PutInt("remote_wins", int64(rs.GetRemoteWins()))
+	}
+}
+
+// stampWorkerPoolAttrs emits a slice-of-map attribute for per-mnemonic worker
+// pool lifecycle stats. Same cap rationale as DynamicExecutionMetrics.
+func stampWorkerPoolAttrs(attrs pcommon.Map, wpm *bep.BuildMetrics_WorkerPoolMetrics) {
+	if wpm == nil {
+		return
+	}
+	stats := wpm.GetWorkerPoolStats()
+	if len(stats) == 0 {
+		return
+	}
+	slice := attrs.PutEmptySlice("bazel.metrics.worker_pool")
+	for i, ws := range stats {
+		if i >= maxBuildMetricsSliceEntries {
+			break
+		}
+		entry := slice.AppendEmpty().SetEmptyMap()
+		entry.PutStr("mnemonic", ws.GetMnemonic())
+		entry.PutInt("created_count", ws.GetCreatedCount())
+		entry.PutInt("destroyed_count", ws.GetDestroyedCount())
+		entry.PutInt("evicted_count", ws.GetEvictedCount())
+		entry.PutInt("alive_count", ws.GetAliveCount())
 	}
 }
 

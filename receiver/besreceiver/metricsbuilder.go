@@ -50,6 +50,7 @@ func addActionSummaryGauges(sm pmetric.ScopeMetrics, as *bep.BuildMetrics_Action
 		return
 	}
 	addGaugeInt64(sm, "bazel.invocation.actions_created", "{action}", "Total actions created during the build", ts, as.GetActionsCreated(), attrs)
+	addGaugeInt64(sm, "bazel.invocation.actions_created_not_including_aspects", "{action}", "Actions created for configured targets (excluding aspects)", ts, as.GetActionsCreatedNotIncludingAspects(), attrs)
 	addGaugeInt64(sm, "bazel.invocation.actions_executed", "{action}", "Total actions executed during the build", ts, as.GetActionsExecuted(), attrs)
 }
 
