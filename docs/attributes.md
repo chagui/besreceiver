@@ -278,6 +278,59 @@ is `Info` for successful events, `Error` for failures and aborts. Log
 records carry the invocation's TraceID so they correlate with the trace
 emitted for the same invocation.
 
+## Progress logs
+
+Bazel's `Progress` BEP events carry streaming stdout/stderr chunks. They
+are opt-in because payloads can be large and may contain anything Bazel
+prints — command lines, file paths, env vars, or secrets echoed by
+actions. Enable routing to the logs pipeline with:
+
+```yaml
+receivers:
+  bes:
+    progress:
+      enabled: true          # default: false
+      max_chunk_size: 65536  # bytes per record; 0 = unlimited
+```
+
+When enabled, each non-empty stream on a `Progress` event emits one log
+record with `event.name=bazel.progress`. Empty streams are skipped. A
+`Progress` with empty stdout AND empty stderr emits nothing.
+
+| Attribute                        | Type   | Source                                          |
+|----------------------------------|--------|-------------------------------------------------|
+| `bazel.invocation_id`            | string | BES stream invocation id                        |
+| `bazel.progress.stream`          | string | `stdout` or `stderr`                            |
+| `bazel.progress.bytes`           | int    | Original byte length of the stream chunk        |
+| `bazel.progress.truncated`       | bool   | `true` when `bytes > max_chunk_size`            |
+| `bazel.progress.opaque_count`    | int    | `BuildEventId.Progress.opaque_count` — same on the stderr and stdout records of one event so consumers can pair them |
+
+Both `bazel.progress.bytes` and `bazel.progress.truncated` are stamped on
+every record so downstream queries can rely on attribute presence rather
+than guarding against absent keys.
+
+Severity is `INFO` on both streams — Bazel routes normal-build chatter
+(`Loading:`, `Analyzing:`, `Build completed successfully`) through stderr,
+so mapping stderr to `ERROR` would page on every green build. Operators
+who need elevation can stack a `transformprocessor`. When both streams
+carry data on the same `Progress` event, the receiver emits stderr first
+to match the BEP spec ordering (`build_event_stream.proto:303-304`).
+
+The record body is the (possibly truncated) stream content. Truncation
+clips at a UTF-8 rune boundary so consumers never see invalid encoding.
+Records carry the invocation's TraceID, matching the correlation scheme
+used for other log records.
+
+Memory note: this feature truncates the *log record body*, not the
+inbound gRPC payload. The full Progress message must still be unmarshalled
+by the receiver before truncation runs. See `docs/adr/0002-large-payload-handling.md`
+for the heap-bounding story (issues #64/#65/#66).
+
+Since stream contents can contain PII, the feature defaults off. When
+enabled, stack a `redactionprocessor` (or similar) downstream to scrub
+sensitive substrings before export — per-key PII controls do not apply
+to free-form output.
+
 ## Metrics
 
 Per-invocation gauges (`bazel.invocation.*`) and cross-invocation

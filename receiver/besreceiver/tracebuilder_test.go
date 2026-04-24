@@ -9,6 +9,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -2837,4 +2838,261 @@ func TestTraceBuilder_Summary_DisabledOmitsAllAttributes(t *testing.T) {
 func TestTraceBuilder_Summary_DefaultFactoryEnablesEmission(t *testing.T) {
 	cfg := createDefaultConfig().(*Config)
 	assert.True(t, cfg.Summary.Enabled, "summary.enabled must default to true")
+}
+
+// --- Progress → logs tests ---
+
+// newProgressTB builds a TraceBuilder with Progress enabled at the given cap.
+// Returns the builder and a logs sink for assertion.
+func newProgressTB(t *testing.T, maxChunkSize int) (*TraceBuilder, *consumertest.LogsSink) {
+	t.Helper()
+	logsSink := new(consumertest.LogsSink)
+	tb := NewTraceBuilder(nil, logsSink, nil, zap.NewNop(), TraceBuilderConfig{
+		Progress: ProgressConfig{Enabled: true, MaxChunkSize: maxChunkSize},
+	})
+	tb.Start()
+	t.Cleanup(tb.Stop)
+	return tb, logsSink
+}
+
+// firstProgressRecord returns the single log record at index i, failing if
+// the shape is unexpected.
+func firstProgressRecord(t *testing.T, sink *consumertest.LogsSink, i int) plog.LogRecord {
+	t.Helper()
+	logs := sink.AllLogs()
+	require.Greater(t, len(logs), i, "missing log record at index %d", i)
+	rl := logs[i].ResourceLogs()
+	require.Equal(t, 1, rl.Len())
+	sl := rl.At(0).ScopeLogs()
+	require.Equal(t, 1, sl.Len())
+	lrs := sl.At(0).LogRecords()
+	require.Equal(t, 1, lrs.Len())
+	return lrs.At(0)
+}
+
+func TestProgress_DisabledByDefault(t *testing.T) {
+	logsSink := new(consumertest.LogsSink)
+	// Zero-value TraceBuilderConfig.Progress → Enabled=false.
+	tb := NewTraceBuilder(nil, logsSink, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-dis", "uuid-dis", "build", 1),
+		makeProgressOBE(t, "inv-dis", 2, "stdout chunk\n", "stderr chunk\n"),
+	)
+
+	// Only the BuildStarted log record; Progress must be suppressed entirely.
+	require.Equal(t, 1, logsSink.LogRecordCount())
+	lr := firstProgressRecord(t, logsSink, 0)
+	evt, _ := lr.Attributes().Get("event.name")
+	assert.Equal(t, "bazel.build.started", evt.Str())
+}
+
+func TestProgress_Enabled_StdoutOnly(t *testing.T) {
+	tb, logsSink := newProgressTB(t, 1024)
+	ctx := context.Background()
+
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-so", "uuid-so", "build", 1),
+		makeProgressOBE(t, "inv-so", 2, "compiling //pkg:lib\n", ""),
+	)
+
+	// 1 BuildStarted + 1 stdout record = 2.
+	require.Equal(t, 2, logsSink.LogRecordCount())
+	lr := firstProgressRecord(t, logsSink, 1)
+	assert.Equal(t, plog.SeverityNumberInfo, lr.SeverityNumber())
+	assert.Equal(t, "compiling //pkg:lib\n", lr.Body().Str())
+
+	evt, _ := lr.Attributes().Get("event.name")
+	assert.Equal(t, "bazel.progress", evt.Str())
+	stream, _ := lr.Attributes().Get("bazel.progress.stream")
+	assert.Equal(t, "stdout", stream.Str())
+	invID, _ := lr.Attributes().Get("bazel.invocation_id")
+	assert.Equal(t, "inv-so", invID.Str())
+
+	// bytes + truncated are always stamped so consumers can rely on presence.
+	bytes, ok := lr.Attributes().Get("bazel.progress.bytes")
+	require.True(t, ok, "bazel.progress.bytes must always be stamped")
+	assert.Equal(t, int64(len("compiling //pkg:lib\n")), bytes.Int())
+
+	trunc, ok := lr.Attributes().Get("bazel.progress.truncated")
+	require.True(t, ok, "bazel.progress.truncated must always be stamped")
+	assert.False(t, trunc.Bool())
+
+	// opaque_count is propagated from BuildEventId so consumers can re-establish
+	// chunk order across stdout/stderr.
+	op, ok := lr.Attributes().Get("bazel.progress.opaque_count")
+	require.True(t, ok)
+	assert.Equal(t, int64(2), op.Int())
+
+	// TraceID ties the record back to the invocation.
+	assert.Equal(t, traceIDFromUUID("uuid-so"), lr.TraceID())
+}
+
+func TestProgress_Enabled_StderrOnly(t *testing.T) {
+	tb, logsSink := newProgressTB(t, 1024)
+	ctx := context.Background()
+
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-se", "uuid-se", "build", 1),
+		makeProgressOBE(t, "inv-se", 2, "", "WARNING: dangling reference\n"),
+	)
+
+	require.Equal(t, 2, logsSink.LogRecordCount())
+	lr := firstProgressRecord(t, logsSink, 1)
+	// stderr maps to INFO — Bazel routes normal-build chatter through stderr.
+	assert.Equal(t, plog.SeverityNumberInfo, lr.SeverityNumber())
+	assert.Equal(t, "WARNING: dangling reference\n", lr.Body().Str())
+	stream, _ := lr.Attributes().Get("bazel.progress.stream")
+	assert.Equal(t, "stderr", stream.Str())
+}
+
+func TestProgress_Enabled_BothStreams_StderrFirst(t *testing.T) {
+	tb, logsSink := newProgressTB(t, 1024)
+	ctx := context.Background()
+
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-both", "uuid-both", "build", 1),
+		makeProgressOBE(t, "inv-both", 2, "out-chunk\n", "err-chunk\n"),
+	)
+
+	// 1 BuildStarted + 2 Progress (stderr first per BEP spec, then stdout).
+	require.Equal(t, 3, logsSink.LogRecordCount())
+
+	stderrLR := firstProgressRecord(t, logsSink, 1)
+	stream1, _ := stderrLR.Attributes().Get("bazel.progress.stream")
+	assert.Equal(t, "stderr", stream1.Str(), "stderr must be emitted first per BEP spec")
+	assert.Equal(t, plog.SeverityNumberInfo, stderrLR.SeverityNumber())
+	assert.Equal(t, "err-chunk\n", stderrLR.Body().Str())
+
+	stdoutLR := firstProgressRecord(t, logsSink, 2)
+	stream2, _ := stdoutLR.Attributes().Get("bazel.progress.stream")
+	assert.Equal(t, "stdout", stream2.Str())
+	assert.Equal(t, plog.SeverityNumberInfo, stdoutLR.SeverityNumber())
+	assert.Equal(t, "out-chunk\n", stdoutLR.Body().Str())
+
+	// Both records share the same opaque_count so consumers can pair them.
+	op1, _ := stderrLR.Attributes().Get("bazel.progress.opaque_count")
+	op2, _ := stdoutLR.Attributes().Get("bazel.progress.opaque_count")
+	assert.Equal(t, op1.Int(), op2.Int())
+}
+
+func TestProgress_Enabled_EmptyStreamsSuppressed(t *testing.T) {
+	tb, logsSink := newProgressTB(t, 1024)
+	ctx := context.Background()
+
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-empty", "uuid-empty", "build", 1),
+		// Both streams empty — no Progress record must be emitted.
+		makeProgressOBE(t, "inv-empty", 2, "", ""),
+	)
+
+	require.Equal(t, 1, logsSink.LogRecordCount(), "empty Progress must emit nothing")
+}
+
+func TestProgress_Truncation_SingleStream(t *testing.T) {
+	const maxChunkSize = 16
+	tb, logsSink := newProgressTB(t, maxChunkSize)
+	ctx := context.Background()
+
+	// 100 bytes of stdout; must be truncated to 16 and stamped.
+	stdout := strings.Repeat("x", 100)
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-trunc", "uuid-trunc", "build", 1),
+		makeProgressOBE(t, "inv-trunc", 2, stdout, ""),
+	)
+
+	require.Equal(t, 2, logsSink.LogRecordCount())
+	lr := firstProgressRecord(t, logsSink, 1)
+	assert.Equal(t, maxChunkSize, len(lr.Body().Str()), "body must be truncated to MaxChunkSize")
+	assert.Equal(t, strings.Repeat("x", maxChunkSize), lr.Body().Str())
+
+	trunc, ok := lr.Attributes().Get("bazel.progress.truncated")
+	require.True(t, ok)
+	assert.True(t, trunc.Bool())
+
+	bytes, ok := lr.Attributes().Get("bazel.progress.bytes")
+	require.True(t, ok)
+	assert.Equal(t, int64(100), bytes.Int(), "bytes reflects original length, not clipped length")
+}
+
+func TestProgress_Truncation_RuneSafe(t *testing.T) {
+	// Cap that lands mid-rune for the test fixture — verify the body is
+	// clipped at a rune boundary rather than producing invalid UTF-8.
+	const maxChunkSize = 5
+	tb, logsSink := newProgressTB(t, maxChunkSize)
+	ctx := context.Background()
+
+	// "héllo" — h(1) + é(2) + l(1) + l(1) + o(1) = 6 bytes; cap of 5 lands
+	// inside é, so truncation must back off to either 1 byte ("h") or 3 bytes
+	// ("hé"). Either way the result must be valid UTF-8.
+	stdout := "héllo"
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-rune", "uuid-rune", "build", 1),
+		makeProgressOBE(t, "inv-rune", 2, stdout, ""),
+	)
+
+	lr := firstProgressRecord(t, logsSink, 1)
+	body := lr.Body().Str()
+	assert.True(t, utf8.ValidString(body), "truncated body must be valid UTF-8, got %q", body)
+	assert.LessOrEqual(t, len(body), maxChunkSize)
+}
+
+func TestProgress_CapDisabled_ZeroMeansUnlimited(t *testing.T) {
+	// MaxChunkSize == 0 disables the cap — even very large bodies pass
+	// through verbatim. truncated is stamped as false; bytes carries the
+	// original length.
+	tb, logsSink := newProgressTB(t, 0)
+	ctx := context.Background()
+
+	stdout := strings.Repeat("y", 1<<20) // 1 MiB
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-unl", "uuid-unl", "build", 1),
+		makeProgressOBE(t, "inv-unl", 2, stdout, ""),
+	)
+
+	require.Equal(t, 2, logsSink.LogRecordCount())
+	lr := firstProgressRecord(t, logsSink, 1)
+	assert.Equal(t, len(stdout), len(lr.Body().Str()), "body must pass through unmodified when cap is 0")
+	trunc, _ := lr.Attributes().Get("bazel.progress.truncated")
+	assert.False(t, trunc.Bool())
+	bytes, _ := lr.Attributes().Get("bazel.progress.bytes")
+	assert.Equal(t, int64(len(stdout)), bytes.Int())
+}
+
+func TestProgress_PostFlushDropped(t *testing.T) {
+	// Progress arriving after BuildFinished (which flushes the trace batch)
+	// must be silently dropped — matches the gate every other handler uses.
+	tb, logsSink := newProgressTB(t, 1024)
+	ctx := context.Background()
+
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-postf", "uuid-postf", "build", 1),
+		makeBuildFinishedOBE(t, "inv-postf", 2, 0, "SUCCESS"),
+		// Late Progress — the batch is already flushed.
+		makeProgressOBE(t, "inv-postf", 3, "late stdout\n", "late stderr\n"),
+	)
+
+	for i := range logsSink.LogRecordCount() {
+		lr := firstProgressRecord(t, logsSink, i)
+		evt, _ := lr.Attributes().Get("event.name")
+		assert.NotEqual(t, "bazel.progress", evt.Str(),
+			"post-flush Progress must not emit a log record")
+	}
+}
+
+func TestProgress_UnknownInvocationDropped(t *testing.T) {
+	// Progress arrives before BuildStarted — no invocation state yet, so the
+	// record must be silently dropped (matches the pattern used by other
+	// handlers).
+	tb, logsSink := newProgressTB(t, 1024)
+	ctx := context.Background()
+
+	processEvents(ctx, t, tb,
+		makeProgressOBE(t, "inv-orphan", 1, "out\n", "err\n"),
+	)
+
+	require.Equal(t, 0, logsSink.LogRecordCount())
 }

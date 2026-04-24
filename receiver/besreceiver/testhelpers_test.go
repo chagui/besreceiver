@@ -388,6 +388,20 @@ func makeTestSummaryOBE(t testing.TB, invID, label string, seqNum int64, status 
 	})
 }
 
+func makeProgressOBE(t testing.TB, invID string, seqNum int64, stdout, stderr string) *pb.OrderedBuildEvent {
+	t.Helper()
+	return makeOrderedBuildEvent(t, invID, seqNum, &bep.BuildEvent{
+		Id: &bep.BuildEventId{
+			Id: &bep.BuildEventId_Progress{
+				Progress: &bep.BuildEventId_ProgressId{OpaqueCount: int32(seqNum)},
+			},
+		},
+		Payload: &bep.BuildEvent_Progress{
+			Progress: &bep.Progress{Stdout: stdout, Stderr: stderr},
+		},
+	})
+}
+
 func makeBuildMetricsOBE(t testing.TB, invID string, seqNum, wallMs, cpuMs int64) *pb.OrderedBuildEvent {
 	t.Helper()
 	return makeOrderedBuildEvent(t, invID, seqNum, &bep.BuildEvent{

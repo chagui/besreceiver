@@ -61,6 +61,16 @@ receivers:
     # the filter above still contributes to the totals. Default: enabled.
     # summary:
     #   enabled: true
+    # Route Bazel Progress events (streaming stdout/stderr) to the logs
+    # pipeline. Opt-in: Progress payloads can be large and may contain
+    # anything Bazel prints — command lines, file paths, env vars, secrets
+    # echoed by actions. Each non-empty stream produces one log record:
+    # stdout -> INFO, stderr -> ERROR. Chunks larger than max_chunk_size are
+    # truncated with bazel.progress.truncated=true and
+    # bazel.progress.original_bytes=N. max_chunk_size: 0 disables the cap.
+    # progress:
+    #   enabled: false
+    #   max_chunk_size: 65536
 
 processors:
   memory_limiter:

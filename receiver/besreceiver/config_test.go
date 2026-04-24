@@ -139,3 +139,33 @@ func TestConfigValidate_NegativeMaxActionDataEntries(t *testing.T) {
 		t.Error("expected error for negative max_action_data_entries")
 	}
 }
+
+func TestConfigDefaults_Progress(t *testing.T) {
+	cfg := createDefaultConfig().(*Config)
+	// Progress emission defaults to off — operators opt in explicitly.
+	if cfg.Progress.Enabled {
+		t.Error("Progress.Enabled must default to false")
+	}
+	if cfg.Progress.MaxChunkSize != defaultProgressMaxChunkSize {
+		t.Errorf("expected default progress.max_chunk_size %d, got %d",
+			defaultProgressMaxChunkSize, cfg.Progress.MaxChunkSize)
+	}
+}
+
+func TestConfigValidate_NegativeProgressMaxChunkSize(t *testing.T) {
+	cfg := createDefaultConfig().(*Config)
+	cfg.Progress.MaxChunkSize = -1
+	if err := cfg.Validate(); err == nil {
+		t.Error("expected error for negative progress.max_chunk_size")
+	}
+}
+
+func TestConfigValidate_ZeroProgressMaxChunkSize(t *testing.T) {
+	// 0 is valid — it disables the cap (unlimited per-record size).
+	cfg := createDefaultConfig().(*Config)
+	cfg.Progress.Enabled = true
+	cfg.Progress.MaxChunkSize = 0
+	if err := cfg.Validate(); err != nil {
+		t.Errorf("expected zero max_chunk_size to validate (means unlimited), got %v", err)
+	}
+}

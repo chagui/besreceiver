@@ -49,6 +49,13 @@ func createDefaultConfig() component.Config {
 			DefaultLevel: DetailLevelVerbose,
 		},
 		Summary: SummaryConfig{Enabled: true},
+		Progress: ProgressConfig{
+			// Disabled by default — Progress payloads are large and may
+			// contain sensitive content echoed by actions. Operators opt in
+			// explicitly to route stdout/stderr into the logs pipeline.
+			Enabled:      false,
+			MaxChunkSize: defaultProgressMaxChunkSize,
+		},
 	}
 }
 
