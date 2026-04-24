@@ -1,0 +1,122 @@
+extensions:
+  health_check:
+    endpoint: "0.0.0.0:13133"
+  # Uncomment to require a bearer token from Bazel clients (BES gRPC side).
+  # Must also be listed under service.extensions and referenced from
+  # receivers.bes.auth.authenticator.
+  # bearertokenauth/bes:
+  #   scheme: "Bearer"
+  #   tokens:
+  #     - "REPLACE_WITH_SECRET_TOKEN"
+  # Uncomment if the downstream OTLP endpoint expects a bearer token on export.
+  # bearertokenauth/otlp:
+  #   scheme: "Bearer"
+  #   token: ${env:OTLP_BEARER_TOKEN}
+
+receivers:
+  bes:
+    endpoint: "0.0.0.0:8082"
+    # Uncomment alongside bearertokenauth/bes above to enforce auth on BES.
+    # auth:
+    #   authenticator: bearertokenauth/bes
+    # Uncomment to enable mutual TLS on the BES gRPC endpoint.
+    # tls:
+    #   cert_file: /etc/otelcol/certs/server.crt
+    #   key_file: /etc/otelcol/certs/server.key
+    #   client_ca_file: /etc/otelcol/certs/ca.crt
+    # PII controls — all default to false. Gating is by content: if
+    # include_hostname is false, no hostname-like attribute is emitted
+    # regardless of which pathway it arrived on. See docs/attributes.md
+    # for the full composition model.
+    # pii:
+    #   include_hostname: false            # bazel.host + host-like workspace/metadata keys
+    #   include_username: false            # bazel.user + user-like workspace/metadata keys
+    #   include_workspace_dir: false       # bazel.workspace_directory
+    #   include_working_dir: false         # bazel.working_directory
+    #   include_command_args: false        # bazel.action.command_line (slice)
+    #   include_action_output_paths: false # bazel.action.primary_output
+    #   include_workspace_status: false    # bazel.workspace.* pathway (per-key filtered)
+    #   include_build_metadata: false      # bazel.metadata.* pathway (per-key filtered)
+    #   include_command_line: false        # bazel.command_line (coarse only)
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 512
+    spike_limit_mib: 128
+  batch:
+    send_batch_size: 8192
+    send_batch_max_size: 8192
+    timeout: 200ms
+  # Uncomment and add to the traces pipeline (after memory_limiter, before batch)
+  # to drop spans by attribute. See the filterprocessor docs for OTTL syntax.
+  # filter/targets:
+  #   traces:
+  #     span:
+  #       - 'attributes["bazel.target.label"] != nil and IsMatch(attributes["bazel.target.label"], "^//third_party/")'
+  # Uncomment and add to each pipeline's processors list (after memory_limiter,
+  # before batch) to scrub sensitive attributes before export.
+  # redaction:
+  #   allow_all_keys: true
+  #   blocked_key_patterns:
+  #     - ".*user.*"
+  #     - ".*email.*"
+  #     - ".*token.*"
+  #   blocked_values:
+  #     - "(?i)bearer\\s+[A-Za-z0-9._\\-]+"
+  #     - "[A-Za-z0-9._%+\\-]+@[A-Za-z0-9.\\-]+\\.[A-Za-z]{2,}"
+  #   summary: debug
+
+exporters:
+  # Generic OTLP gRPC exporter. Override OTLP_ENDPOINT in .env (or your
+  # deployment env) to point at any OTLP-compatible backend:
+  # contrib collector, Honeycomb, New Relic, Uptrace, Signoz, etc.
+  otlp:
+    endpoint: ${env:OTLP_ENDPOINT}
+    # Flip to false + configure ca_file when targeting TLS-terminated endpoints.
+    tls:
+      insecure: ${env:OTLP_INSECURE}
+    # Uncomment if the backend expects a bearer token.
+    # auth:
+    #   authenticator: bearertokenauth/otlp
+    # Attach per-backend headers if needed (API keys, team IDs, dataset names).
+    # headers:
+    #   x-honeycomb-team: ${env:HONEYCOMB_API_KEY}
+    #   x-honeycomb-dataset: bazel-builds
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      max_elapsed_time: 300s
+    sending_queue:
+      enabled: true
+      num_consumers: 10
+      queue_size: 5000
+  debug:
+    verbosity: basic
+
+service:
+  extensions: [health_check]
+  telemetry:
+    logs:
+      level: info
+    metrics:
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: "0.0.0.0"
+                port: 8888
+  pipelines:
+    traces:
+      receivers: [bes]
+      processors: [memory_limiter, batch]
+      exporters: [otlp, debug]
+    metrics:
+      receivers: [bes]
+      processors: [memory_limiter, batch]
+      exporters: [otlp]
+    logs:
+      receivers: [bes]
+      processors: [memory_limiter, batch]
+      exporters: [otlp]

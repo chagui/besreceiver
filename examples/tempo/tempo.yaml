@@ -1,0 +1,30 @@
+# Minimal Tempo single-binary config. Accepts OTLP on gRPC (4317) and HTTP
+# (4318), stores blocks on local disk. Not production-grade — single replica,
+# no retention policy, no WAL tuning. Swap the storage backend for S3/GCS in
+# production and front Tempo with an ingester/distributor split.
+server:
+  http_listen_port: 3200
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: "0.0.0.0:4317"
+        http:
+          endpoint: "0.0.0.0:4318"
+
+ingester:
+  max_block_duration: 5m
+
+compactor:
+  compaction:
+    block_retention: 1h
+
+storage:
+  trace:
+    backend: local
+    wal:
+      path: /var/tempo/wal
+    local:
+      path: /var/tempo/blocks
