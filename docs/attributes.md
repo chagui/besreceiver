@@ -148,6 +148,30 @@ action-summary aggregates for the whole build.
 | `bazel.metrics.actions_created`          | int  | `ActionSummary.actions_created`           |
 | `bazel.metrics.actions_executed`         | int  | `ActionSummary.actions_executed`          |
 
+## Summary counters
+
+Aggregate per-invocation counters stamped on the root `bazel.build` span. Counts
+reflect the full build — targets dropped by [detail-level filtering](filter.md)
+still contribute to the totals so dashboards and alerts see a stable view of
+build health regardless of trace verbosity. Enabled by default; set
+`summary.enabled: false` to suppress the entire block.
+
+| Attribute                         | Type | Source                                         |
+|-----------------------------------|------|------------------------------------------------|
+| `bazel.summary.total_targets`     | int  | count of `TargetConfigured` events             |
+| `bazel.summary.total_actions`     | int  | count of `ActionExecuted` events               |
+| `bazel.summary.success_actions`   | int  | `ActionExecuted` with `success=true`           |
+| `bazel.summary.failed_actions`    | int  | `ActionExecuted` with `success=false`          |
+| `bazel.summary.total_tests`       | int  | count of `TestSummary` events (one per target) |
+| `bazel.summary.passed_tests`      | int  | `TestSummary.overall_status = PASSED`          |
+| `bazel.summary.failed_tests`      | int  | `TestSummary.overall_status = FAILED/TIMEOUT/...` |
+| `bazel.summary.flaky_tests`       | int  | `TestSummary.overall_status = FLAKY`           |
+
+Test tallies come from `TestSummary` (post-retry verdict, emitted once per test
+target) rather than `TestResult` (one per attempt), so flaky retries don't
+double-count. Zero-valued counters are still emitted when the feature is
+enabled so downstream queries can rely on attribute presence.
+
 ## PII controls
 
 Attributes marked **PII** above are gated by the `pii:` config block on the

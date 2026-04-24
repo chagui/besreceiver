@@ -111,9 +111,36 @@ type invocationState struct {
 	// installs a pass-through filter when the operator has not configured
 	// one, so callers can dereference without a guard.
 	filter *Filter
+
+	// summary toggles the bazel.summary.* block on the root span. Counters in
+	// `summaryCounts` are populated unconditionally so enabling the feature
+	// mid-build (unsupported today) would still produce consistent totals.
+	summary SummaryConfig
+	// summaryCounts accumulates aggregate counters for emission on the root
+	// span during finalize. Recording happens in the event mutators
+	// (addTarget / addAction / addTestResult / summarizeTarget) before any
+	// filtering or span emission, so totals reflect the full build even when
+	// detail-level filtering (see #13) suppresses the matching span.
+	summaryCounts BuildSummary
 }
 
-func newInvocationState(traceID pcommon.TraceID, rootSpanID pcommon.SpanID, started *bep.BuildStarted, now time.Time, pii PIIConfig, caps HighCardinalityCaps, filter *Filter) *invocationState {
+// BuildSummary holds per-invocation aggregate counters emitted as
+// bazel.summary.* attributes on the root bazel.build span. Fields match the
+// issue #15 spec; CachedLocally is populated from TestResult.cached_locally
+// but not stamped on the span today (reserved for a future attribute).
+type BuildSummary struct {
+	TotalTargets   int64
+	TotalActions   int64
+	FailedActions  int64
+	SuccessActions int64
+	CachedLocally  int64
+	TotalTests     int64
+	PassedTests    int64
+	FailedTests    int64
+	FlakyTests     int64
+}
+
+func newInvocationState(traceID pcommon.TraceID, rootSpanID pcommon.SpanID, started *bep.BuildStarted, now time.Time, pii PIIConfig, caps HighCardinalityCaps, filter *Filter, summary SummaryConfig) *invocationState {
 	traces, ss := newTracesPayload()
 	if filter == nil {
 		filter = NewFilter(FilterConfig{})
@@ -130,6 +157,7 @@ func newInvocationState(traceID pcommon.TraceID, rootSpanID pcommon.SpanID, star
 		pii:           pii,
 		caps:          caps,
 		filter:        filter,
+		summary:       summary,
 	}
 }
 
@@ -152,6 +180,10 @@ func (s *invocationState) addTarget(label, ruleKind, configID string) int {
 	if s.flushed {
 		return 0
 	}
+	// Summary records before any filtering — the count reflects the full
+	// build, not only the targets whose spans are ultimately emitted.
+	s.summaryCounts.TotalTargets++
+
 	// Filter runs at event-processing time, not emission time: skipping here
 	// avoids any allocation for targets the operator has dropped. The root
 	// bazel.build and bazel.metrics spans bypass the filter entirely and
@@ -203,6 +235,10 @@ func (s *invocationState) addAction(label, configID, primaryOutput string, actio
 	if s.flushed {
 		return
 	}
+	// Summary records before any filtering — the counts reflect the full
+	// build, not only the actions whose spans are ultimately emitted.
+	s.recordActionSummary(action)
+
 	// Action-label filtering uses the owning target's label — actions are
 	// structural children. When label is empty the filter falls through to
 	// DefaultLevel, which is the only correct default (the action can't be
@@ -277,6 +313,13 @@ func (s *invocationState) addTestResult(label, configID string, tr *bep.BuildEve
 	if s.flushed {
 		return
 	}
+	// Summary records CachedLocally per-attempt before filtering; the per-test
+	// pass/fail/flaky tallies come from TestSummary (one per target) in
+	// summarizeTarget so retries don't double-count.
+	if result.GetCachedLocally() {
+		s.summaryCounts.CachedLocally++
+	}
+
 	// Tests share the action gate: allowAction()==true only at verbose.
 	// If the operator wants per-target summary without per-shard detail,
 	// DetailLevelTargets suppresses both.
@@ -470,6 +513,8 @@ func (s *invocationState) writeRootSpan(finished *bep.BuildFinished) {
 
 	s.applyContextAttributes(span)
 
+	s.applySummaryAttributes(span)
+
 	if finished != nil {
 		exitCode := finished.GetExitCode()
 		span.Attributes().PutStr("bazel.exit_code.name", exitCode.GetName())
@@ -660,9 +705,28 @@ func (s *invocationState) completeTarget(label string, tc *bep.TargetComplete) {
 // summarizeTarget applies TestSummary attributes to the target span. No-op
 // when the target span is missing (non-test target or out-of-order) or when
 // the state is already flushed.
+//
+// Summary counts are driven by TestSummary.overall_status (one per test
+// target, post-retry verdict) rather than individual TestResult events, so
+// the totals reflect unique tests rather than attempts. The counter update
+// runs unconditionally — including the missing-span case — so a test target
+// whose span was dropped by detail-level filtering still contributes.
 func (s *invocationState) summarizeTarget(label string, ts *bep.TestSummary) {
 	if s.flushed {
 		return
+	}
+	s.summaryCounts.TotalTests++
+	switch ts.GetOverallStatus() {
+	case bep.TestStatus_PASSED:
+		s.summaryCounts.PassedTests++
+	case bep.TestStatus_FLAKY:
+		s.summaryCounts.FlakyTests++
+	case bep.TestStatus_FAILED, bep.TestStatus_TIMEOUT, bep.TestStatus_INCOMPLETE,
+		bep.TestStatus_REMOTE_FAILURE, bep.TestStatus_FAILED_TO_BUILD,
+		bep.TestStatus_TOOL_HALTED_BEFORE_TESTING:
+		s.summaryCounts.FailedTests++
+	case bep.TestStatus_NO_STATUS:
+		// Unreported status — include in the total but don't tag a verdict.
 	}
 	span, ok := s.targets[targetKey(label, "")]
 	if !ok {
@@ -724,6 +788,37 @@ func (s *invocationState) applyContextAttributes(span ptrace.Span) {
 			span.Attributes().PutStr("bazel.metadata."+k, s.buildMetadata[k])
 		}
 	}
+}
+
+// recordActionSummary increments per-invocation action counters for a single
+// ActionExecuted event. Extracted to keep addAction below the cognitive
+// complexity budget.
+func (s *invocationState) recordActionSummary(action *bep.ActionExecuted) {
+	s.summaryCounts.TotalActions++
+	if action.GetSuccess() {
+		s.summaryCounts.SuccessActions++
+		return
+	}
+	s.summaryCounts.FailedActions++
+}
+
+// applySummaryAttributes writes bazel.summary.* aggregate counters on the
+// root span. No-op when Summary.Enabled is false. Zero-valued counters are
+// emitted so downstream queries can rely on attribute presence rather than
+// guarding against absent keys.
+func (s *invocationState) applySummaryAttributes(span ptrace.Span) {
+	if !s.summary.Enabled {
+		return
+	}
+	attrs := span.Attributes()
+	attrs.PutInt("bazel.summary.total_targets", s.summaryCounts.TotalTargets)
+	attrs.PutInt("bazel.summary.total_actions", s.summaryCounts.TotalActions)
+	attrs.PutInt("bazel.summary.success_actions", s.summaryCounts.SuccessActions)
+	attrs.PutInt("bazel.summary.failed_actions", s.summaryCounts.FailedActions)
+	attrs.PutInt("bazel.summary.total_tests", s.summaryCounts.TotalTests)
+	attrs.PutInt("bazel.summary.passed_tests", s.summaryCounts.PassedTests)
+	attrs.PutInt("bazel.summary.failed_tests", s.summaryCounts.FailedTests)
+	attrs.PutInt("bazel.summary.flaky_tests", s.summaryCounts.FlakyTests)
 }
 
 // nullConfigID is Bazel's sentinel for the null configuration — a TargetCompletedId

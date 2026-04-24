@@ -44,6 +44,10 @@ type Config struct {
 	// empty, the receiver emits every span (pre-filter behaviour). See
 	// FilterConfig.
 	Filter FilterConfig `mapstructure:"filter"`
+
+	// Summary controls aggregate build counters stamped on the root span.
+	// See SummaryConfig.
+	Summary SummaryConfig `mapstructure:"summary"`
 }
 
 // HighCardinalityCaps configures per-attribute limits on the Slice[Map]
@@ -97,6 +101,19 @@ func (c HighCardinalityCaps) withDefaults() HighCardinalityCaps {
 		c.GraphValues = d.GraphValues
 	}
 	return c
+}
+
+// SummaryConfig controls whether per-invocation aggregate counters are emitted
+// as bazel.summary.* attributes on the root bazel.build span. Default enabled.
+//
+// Summary counts reflect the full build — they are recorded before any
+// detail-level filter would drop the underlying target/action/test span,
+// so a dropped span still contributes to the totals.
+type SummaryConfig struct {
+	// Enabled toggles emission of all bazel.summary.* attributes. When true
+	// (default), every counter is emitted as Int64 including zero values so
+	// downstream queries can rely on attribute presence.
+	Enabled bool `mapstructure:"enabled"`
 }
 
 // PIIConfig controls which potentially-sensitive fields from BEP events are

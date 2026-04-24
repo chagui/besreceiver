@@ -591,6 +591,7 @@ func TestReapStale(t *testing.T) {
 		PIIConfig{},
 		HighCardinalityCaps{},
 		nil,
+		SummaryConfig{},
 	)
 	span := state.appendSpan()
 	span.SetSpanID(spanIDFromIdentity("uuid-stale", "action", "//pkg:lib", "Javac", ""))
@@ -1589,6 +1590,7 @@ func TestTraceBuilder_Aborted_WithoutBuildFinished(t *testing.T) {
 		PIIConfig{},
 		HighCardinalityCaps{},
 		nil,
+		SummaryConfig{},
 	)
 	state.recordAbort(&bep.Aborted{Reason: bep.Aborted_TIME_OUT, Description: "deadline"})
 
@@ -2718,4 +2720,121 @@ func TestTraceBuilder_StructuredCommandLine_Truncated(t *testing.T) {
 	// <= commandLineMaxBytes + ellipsis rune (3 bytes).
 	assert.LessOrEqual(t, len(cmd.Str()), commandLineMaxBytes+3)
 	assert.True(t, strings.HasSuffix(cmd.Str(), "…"), "expected truncation marker")
+}
+
+// summaryAttrInt fetches a bazel.summary.* Int64 attribute from the root span.
+// Asserts presence and returns the value so callers can compare against
+// per-test expectations inline.
+func summaryAttrInt(t *testing.T, span ptrace.Span, key string) int64 {
+	t.Helper()
+	v, ok := span.Attributes().Get(key)
+	require.Truef(t, ok, "expected attribute %s on root span", key)
+	require.Equalf(t, pcommon.ValueTypeInt, v.Type(), "expected %s to be Int64", key)
+	return v.Int()
+}
+
+// TestTraceBuilder_Summary_AccurateCounts feeds a representative event stream
+// (2 targets, 3 actions with a 2/1 success/fail split, 3 tests covering the
+// passed/flaky/failed verdicts) and asserts every bazel.summary.* value.
+func TestTraceBuilder_Summary_AccurateCounts(t *testing.T) {
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{
+		Summary: SummaryConfig{Enabled: true},
+	})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-sum", "uuid-sum", "build", 1),
+		makeTargetConfiguredOBE(t, "inv-sum", "//pkg:lib", 2),
+		makeTargetConfiguredOBE(t, "inv-sum", "//pkg:test", 3),
+		makeActionOBE(t, "inv-sum", "//pkg:lib", "Javac", 4, true),
+		makeActionOBE(t, "inv-sum", "//pkg:lib", "Turbine", 5, true),
+		makeActionOBE(t, "inv-sum", "//pkg:lib", "Javac", 6, false),
+		makeTestSummaryOBE(t, "inv-sum", "//pkg:test/pass", 7, bep.TestStatus_PASSED, 1, 1, 0, 0),
+		makeTestSummaryOBE(t, "inv-sum", "//pkg:test/flake", 8, bep.TestStatus_FLAKY, 1, 1, 0, 0),
+		makeTestSummaryOBE(t, "inv-sum", "//pkg:test/fail", 9, bep.TestStatus_FAILED, 1, 1, 0, 0),
+		makeBuildFinishedOBE(t, "inv-sum", 10, 0, "SUCCESS"),
+	)
+
+	root := findRootSpan(t, sink)
+	assert.Equal(t, int64(2), summaryAttrInt(t, root, "bazel.summary.total_targets"))
+	assert.Equal(t, int64(3), summaryAttrInt(t, root, "bazel.summary.total_actions"))
+	assert.Equal(t, int64(2), summaryAttrInt(t, root, "bazel.summary.success_actions"))
+	assert.Equal(t, int64(1), summaryAttrInt(t, root, "bazel.summary.failed_actions"))
+	assert.Equal(t, int64(3), summaryAttrInt(t, root, "bazel.summary.total_tests"))
+	assert.Equal(t, int64(1), summaryAttrInt(t, root, "bazel.summary.passed_tests"))
+	assert.Equal(t, int64(1), summaryAttrInt(t, root, "bazel.summary.failed_tests"))
+	assert.Equal(t, int64(1), summaryAttrInt(t, root, "bazel.summary.flaky_tests"))
+}
+
+// TestTraceBuilder_Summary_ZeroCountersEmittedWhenEnabled verifies that a
+// build without any targets / actions / tests still produces zero-valued
+// Int64 attributes — the spec requires attribute presence regardless of
+// event count so downstream queries can rely on the keys existing.
+func TestTraceBuilder_Summary_ZeroCountersEmittedWhenEnabled(t *testing.T) {
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{
+		Summary: SummaryConfig{Enabled: true},
+	})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-zero", "uuid-zero", "build", 1),
+		makeBuildFinishedOBE(t, "inv-zero", 2, 0, "SUCCESS"),
+	)
+
+	root := findRootSpan(t, sink)
+	for _, key := range []string{
+		"bazel.summary.total_targets",
+		"bazel.summary.total_actions",
+		"bazel.summary.success_actions",
+		"bazel.summary.failed_actions",
+		"bazel.summary.total_tests",
+		"bazel.summary.passed_tests",
+		"bazel.summary.failed_tests",
+		"bazel.summary.flaky_tests",
+	} {
+		assert.Equal(t, int64(0), summaryAttrInt(t, root, key), "%s should be 0", key)
+	}
+}
+
+// TestTraceBuilder_Summary_DisabledOmitsAllAttributes asserts the enabled=false
+// path omits every bazel.summary.* attribute — not just zeros, but the keys
+// themselves. Mirrors the feature-gate contract in the issue acceptance
+// criteria.
+func TestTraceBuilder_Summary_DisabledOmitsAllAttributes(t *testing.T) {
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{
+		Summary: SummaryConfig{Enabled: false},
+	})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-off", "uuid-off", "build", 1),
+		makeTargetConfiguredOBE(t, "inv-off", "//pkg:lib", 2),
+		makeActionOBE(t, "inv-off", "//pkg:lib", "Javac", 3, true),
+		makeTestSummaryOBE(t, "inv-off", "//pkg:test", 4, bep.TestStatus_PASSED, 1, 1, 0, 0),
+		makeBuildFinishedOBE(t, "inv-off", 5, 0, "SUCCESS"),
+	)
+
+	root := findRootSpan(t, sink)
+	root.Attributes().Range(func(k string, _ pcommon.Value) bool {
+		assert.Falsef(t, strings.HasPrefix(k, "bazel.summary."),
+			"no bazel.summary.* attribute should be emitted when disabled, found %s", k)
+		return true
+	})
+}
+
+// TestTraceBuilder_Summary_DefaultFactoryEnablesEmission guards the default
+// config path — createDefaultConfig() must set Summary.Enabled=true so users
+// who never set the block still see the aggregate counters.
+func TestTraceBuilder_Summary_DefaultFactoryEnablesEmission(t *testing.T) {
+	cfg := createDefaultConfig().(*Config)
+	assert.True(t, cfg.Summary.Enabled, "summary.enabled must default to true")
 }
