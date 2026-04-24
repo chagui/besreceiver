@@ -60,6 +60,8 @@ type TraceBuilderConfig struct {
 	// bazel.metrics span and as per-mnemonic gauges. Zero selects the default
 	// (defaultMaxActionDataEntries).
 	MaxActionDataEntries int
+	// Filter configures per-target detail level filtering. Empty value = pass-through.
+	Filter FilterConfig
 }
 
 // TraceBuilder converts BEP events into OTel traces, logs, and metrics.
@@ -89,6 +91,10 @@ type TraceBuilder struct {
 	// TraceBuilderConfig.MaxActionDataEntries with defaultMaxActionDataEntries
 	// as the zero-value fallback.
 	maxActionDataEntries int
+
+	// filter gates per-target span emission. Compiled once at NewTraceBuilder
+	// time and shared across invocations (immutable after construction).
+	filter *Filter
 
 	// Cumulative counters for cross-invocation metrics.
 	counters *cumulativeCounters
@@ -145,6 +151,7 @@ func NewTraceBuilder(tracesConsumer consumer.Traces, logsConsumer consumer.Logs,
 		pii:                  cfg.PII,
 		caps:                 cfg.Caps.withDefaults(),
 		maxActionDataEntries: cfg.MaxActionDataEntries,
+		filter:               NewFilter(cfg.Filter),
 		counters:             newCumulativeCounters(pcommon.NewTimestampFromTime(time.Now())),
 		activeInvocations:    activeInvocations,
 		eventsProcessed:      eventsProcessed,
@@ -351,7 +358,7 @@ func eventTypeName(event *bep.BuildEvent) string {
 func (tb *TraceBuilder) handleBuildStarted(ctx context.Context, invocations map[string]*invocationState, invocationID string, started *bep.BuildStarted) error {
 	traceID := traceIDFromUUID(started.GetUuid())
 	rootSpanID := spanIDFromIdentity(started.GetUuid(), "root")
-	invocations[invocationID] = newInvocationState(traceID, rootSpanID, started, time.Now(), tb.pii, tb.caps)
+	invocations[invocationID] = newInvocationState(traceID, rootSpanID, started, time.Now(), tb.pii, tb.caps, tb.filter)
 	tb.activeInvocations.Add(ctx, 1)
 
 	tb.logger.Debug("Build started",

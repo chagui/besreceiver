@@ -39,6 +39,21 @@ receivers:
     #   include_workspace_status: false    # bazel.workspace.* pathway (per-key filtered)
     #   include_build_metadata: false      # bazel.metadata.* pathway (per-key filtered)
     #   include_command_line: false        # bazel.command_line (coarse only)
+    # Per-target detail level filtering. default_level applies when no rule
+    # matches; rules are evaluated in order and first match wins. Levels:
+    #   drop       emits only the root bazel.build and bazel.metrics spans
+    #   build_only same as drop for per-target emission
+    #   targets    also emits bazel.target, skips actions/tests
+    #   verbose    emits everything (default, preserves pre-filter behaviour)
+    # Patterns: "//pkg:target" (exact), "//pkg:*" (all targets in pkg),
+    # "//pkg/..." (all targets under pkg and descendants). See docs/filter.md.
+    # filter:
+    #   default_level: verbose
+    #   rules:
+    #     - pattern: "//third_party/..."
+    #       detail_level: build_only
+    #     - pattern: "//src/main/..."
+    #       detail_level: verbose
 
 processors:
   memory_limiter:
