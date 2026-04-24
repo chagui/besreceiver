@@ -28,9 +28,14 @@ import (
 //     target when TargetConfigured arrives (see recordPendingReparent /
 //     drainPendingReparent). Orphans whose TargetConfigured never arrives
 //     remain parented to root at finalize time.
-//  3. Events after BuildFinished (except BuildMetrics) are silently discarded
-//     because finalize sets flushed=true, and addTarget/addAction/addTestResult
-//     all short-circuit on that flag.
+//  3. TargetConfigured/ActionExecuted/TestResult arriving after BuildFinished
+//     but before BuildMetrics (which deletes the state) are emitted in a
+//     standalone ptrace.Traces payload by the corresponding lateXSpan
+//     method — same pattern as buildMetricsSpan. The main span batch has
+//     already been flushed, so these late spans ride on the same traceID
+//     and parent into the existing target (if known) or the root. Orphan
+//     reparenting is disabled post-flush because the pre-flush batch is
+//     already out.
 //
 // Bazel has historically maintained this ordering in practice, and the BES gRPC
 // transport (OrderedBuildEvent) preserves stream order.
@@ -119,8 +124,23 @@ func (s *invocationState) addTarget(label, ruleKind, configID string) int {
 		return 0
 	}
 
-	spanID := spanIDFromIdentity(s.uuid, "target", label)
 	span := s.appendSpan()
+	spanID := s.populateTargetSpan(span, label, ruleKind, configID)
+
+	// Store the span handle so later TargetComplete / TestSummary events can
+	// mutate attributes on the existing target span.
+	s.targets[targetKey(label, "")] = span
+
+	// Reparent any actions/tests that arrived before this target.
+	return s.drainPendingReparent(label, spanID)
+}
+
+// populateTargetSpan stamps identity, parenting, and attributes on a
+// pre-appended target span. Returns the span id so callers can wire it into
+// the targets map and reparent orphans. Shared by the pre-flush addTarget
+// path and the post-flush lateTargetSpan path.
+func (s *invocationState) populateTargetSpan(span ptrace.Span, label, ruleKind, configID string) pcommon.SpanID {
+	spanID := spanIDFromIdentity(s.uuid, "target", label)
 	span.SetSpanID(spanID)
 	span.SetParentSpanID(s.rootSpanID)
 	span.SetName("bazel.target")
@@ -135,13 +155,7 @@ func (s *invocationState) addTarget(label, ruleKind, configID string) int {
 	// payload for this target's config id. No back-patching if it arrives
 	// later — Bazel emits Configuration before TargetConfigured in practice.
 	s.stampTargetConfig(span, configID)
-
-	// Store the span handle so later TargetComplete / TestSummary events can
-	// mutate attributes on the existing target span.
-	s.targets[targetKey(label, "")] = span
-
-	// Reparent any actions/tests that arrived before this target.
-	return s.drainPendingReparent(label, spanID)
+	return spanID
 }
 
 func (s *invocationState) addAction(label, configID, primaryOutput string, action *bep.ActionExecuted) {
@@ -152,7 +166,7 @@ func (s *invocationState) addAction(label, configID, primaryOutput string, actio
 	parentSpanID, resolved := s.resolveTargetSpan(label, configID)
 
 	span := s.appendSpan()
-	span.SetSpanID(spanIDFromIdentity(s.uuid, "action", label, action.GetType(), primaryOutput))
+	s.populateActionSpan(span, parentSpanID, label, primaryOutput, action)
 
 	// If the target hasn't been configured yet, buffer the span handle for
 	// deferred reparenting when addTarget is called for this label. pdata
@@ -161,6 +175,14 @@ func (s *invocationState) addAction(label, configID, primaryOutput string, actio
 	if !resolved && label != "" {
 		s.recordPendingReparent(label, span)
 	}
+}
+
+// populateActionSpan stamps identity, parenting, and attributes on a
+// pre-appended action span. Shared by the pre-flush addAction path and the
+// post-flush lateActionSpan path. Caller handles orphan recording (only
+// meaningful pre-flush).
+func (s *invocationState) populateActionSpan(span ptrace.Span, parentSpanID pcommon.SpanID, label, primaryOutput string, action *bep.ActionExecuted) {
+	span.SetSpanID(spanIDFromIdentity(s.uuid, "action", label, action.GetType(), primaryOutput))
 	span.SetParentSpanID(parentSpanID)
 	if mnemonic := action.GetType(); mnemonic != "" {
 		span.SetName("bazel.action " + mnemonic)
@@ -211,15 +233,23 @@ func (s *invocationState) addTestResult(label, configID string, tr *bep.BuildEve
 	parentSpanID, resolved := s.resolveTargetSpan(label, configID)
 
 	span := s.appendSpan()
+	s.populateTestResultSpan(span, parentSpanID, label, tr, result)
+
+	if !resolved && label != "" {
+		s.recordPendingReparent(label, span)
+	}
+}
+
+// populateTestResultSpan stamps identity, parenting, and attributes on a
+// pre-appended test span. Shared by the pre-flush addTestResult path and
+// the post-flush lateTestResultSpan path. Caller handles orphan recording
+// (only meaningful pre-flush).
+func (s *invocationState) populateTestResultSpan(span ptrace.Span, parentSpanID pcommon.SpanID, label string, tr *bep.BuildEventId_TestResultId, result *bep.TestResult) {
 	span.SetSpanID(spanIDFromIdentity(s.uuid, "test", label,
 		strconv.Itoa(int(tr.GetRun())),
 		strconv.Itoa(int(tr.GetShard())),
 		strconv.Itoa(int(tr.GetAttempt())),
 	))
-
-	if !resolved && label != "" {
-		s.recordPendingReparent(label, span)
-	}
 	span.SetParentSpanID(parentSpanID)
 	span.SetName("bazel.test")
 	span.SetKind(ptrace.SpanKindInternal)
@@ -592,6 +622,46 @@ func (s *invocationState) stampTargetConfig(span ptrace.Span, configID string) {
 		span.Attributes().PutStr("bazel.target.config.cpu", c)
 	}
 	span.Attributes().PutBool("bazel.target.config.is_tool", cfg.GetIsTool())
+}
+
+// lateTargetSpan emits a standalone bazel.target span for a TargetConfigured
+// event that arrived after the main batch was flushed. The target span handle
+// is recorded on s.targets so later post-flush actions/tests for the same
+// label can parent correctly. Orphan reparenting is a no-op here because the
+// pre-flush batch has already been handed to the consumer.
+func (s *invocationState) lateTargetSpan(label, ruleKind, configID string) ptrace.Traces {
+	traces, ss := newTracesPayload()
+	span := ss.Spans().AppendEmpty()
+	span.SetTraceID(s.traceID)
+	s.populateTargetSpan(span, label, ruleKind, configID)
+	s.targets[targetKey(label, "")] = span
+	return traces
+}
+
+// lateActionSpan emits a standalone bazel.action span for an ActionExecuted
+// event that arrived after the main batch was flushed. Parent is resolved
+// against s.targets (which persists across flush); if unknown the span
+// parents to the root. Orphan recording is skipped because no future
+// TargetConfigured can reparent into an already-emitted batch.
+func (s *invocationState) lateActionSpan(label, configID, primaryOutput string, action *bep.ActionExecuted) ptrace.Traces {
+	traces, ss := newTracesPayload()
+	span := ss.Spans().AppendEmpty()
+	span.SetTraceID(s.traceID)
+	parentSpanID, _ := s.resolveTargetSpan(label, configID)
+	s.populateActionSpan(span, parentSpanID, label, primaryOutput, action)
+	return traces
+}
+
+// lateTestResultSpan emits a standalone bazel.test span for a TestResult
+// event that arrived after the main batch was flushed. Parent resolution
+// follows the same rules as lateActionSpan.
+func (s *invocationState) lateTestResultSpan(label, configID string, tr *bep.BuildEventId_TestResultId, result *bep.TestResult) ptrace.Traces {
+	traces, ss := newTracesPayload()
+	span := ss.Spans().AppendEmpty()
+	span.SetTraceID(s.traceID)
+	parentSpanID, _ := s.resolveTargetSpan(label, configID)
+	s.populateTestResultSpan(span, parentSpanID, label, tr, result)
+	return traces
 }
 
 // buildMetricsSpan creates a standalone Traces payload for BuildMetrics.

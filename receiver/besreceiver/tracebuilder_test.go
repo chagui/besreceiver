@@ -1081,8 +1081,11 @@ func TestTraceBuilder_ActionBeforeTargetConfigured(t *testing.T) {
 }
 
 func TestTraceBuilder_TargetConfiguredAfterBuildFinished(t *testing.T) {
-	// TargetConfigured arriving after BuildFinished should be silently dropped
-	// because the invocation is already flushed.
+	// TargetConfigured arriving after BuildFinished should be emitted in a
+	// standalone ptrace.Traces payload (same pattern as BuildMetrics) rather
+	// than silently dropped. The late target span rides on the same traceID
+	// and parents to the root span so downstream backends stitch the build
+	// tree together.
 	sink := new(consumertest.TracesSink)
 	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
 	tb.Start()
@@ -1096,52 +1099,148 @@ func TestTraceBuilder_TargetConfiguredAfterBuildFinished(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	spansBefore := sink.SpanCount()
+	preFlushBatches := len(sink.AllTraces())
+	preFlushSpans := sink.SpanCount()
 
-	// TargetConfigured arrives after flush — should be a no-op.
-	if err := tb.ProcessOrderedBuildEvent(ctx, makeTargetConfiguredOBE(t, "inv-late-tc", "//pkg:lib", 3)); err != nil {
-		t.Fatal(err)
-	}
+	// TargetConfigured arrives after flush — should emit a standalone batch
+	// with the target span parented under the existing root span.
+	require.NoError(t, tb.ProcessOrderedBuildEvent(ctx, makeTargetConfiguredOBE(t, "inv-late-tc", "//pkg:lib", 3)))
 
-	if sink.SpanCount() != spansBefore {
-		t.Errorf("expected no new spans after flush, got %d new", sink.SpanCount()-spansBefore)
-	}
+	allTraces := sink.AllTraces()
+	require.Len(t, allTraces, preFlushBatches+1, "expected a separate ConsumeTraces call for the late TargetConfigured")
+	require.Equal(t, preFlushSpans+1, sink.SpanCount(), "expected exactly one new span for the late TargetConfigured")
+
+	lateBatch := allTraces[len(allTraces)-1]
+	lateSpans := lateBatch.ResourceSpans().At(0).ScopeSpans().At(0).Spans()
+	require.Equal(t, 1, lateSpans.Len(), "late batch should carry exactly the target span")
+	lateTarget := lateSpans.At(0)
+	assert.Equal(t, "bazel.target", lateTarget.Name())
+	label, ok := lateTarget.Attributes().Get("bazel.target.label")
+	require.True(t, ok)
+	assert.Equal(t, "//pkg:lib", label.Str())
+
+	// Parent should be the root span of the original batch (deterministic
+	// SpanID derived from the invocation uuid).
+	rootSpanID := spanIDFromIdentity("uuid-late-tc", "root")
+	assert.Equal(t, rootSpanID, lateTarget.ParentSpanID())
+
+	// TraceID must match the flushed batch so the late span joins the trace.
+	flushedRoot := findRootSpan(t, sink)
+	assert.Equal(t, flushedRoot.TraceID(), lateTarget.TraceID())
 }
 
 func TestTraceBuilder_ActionAfterBuildFinishedBeforeMetrics(t *testing.T) {
 	// ActionExecuted arriving after BuildFinished (but before BuildMetrics
-	// cleans up state) should be silently dropped.
+	// cleans up state) should be emitted in a standalone ptrace.Traces
+	// payload. If the action's target was already seen pre-flush, the late
+	// span parents to the target span; otherwise it parents to the root.
 	sink := new(consumertest.TracesSink)
 	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
 	tb.Start()
 	defer tb.Stop()
 	ctx := context.Background()
 
-	if err := tb.ProcessOrderedBuildEvent(ctx, makeBuildStartedOBE(t, "inv-late-act", "uuid-late-act", "build", 1)); err != nil {
-		t.Fatal(err)
-	}
-	if err := tb.ProcessOrderedBuildEvent(ctx, makeBuildFinishedOBE(t, "inv-late-act", 2, 0, "SUCCESS")); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, tb.ProcessOrderedBuildEvent(ctx, makeBuildStartedOBE(t, "inv-late-act", "uuid-late-act", "build", 1)))
+	// Include a TargetConfigured pre-flush so the late action has a resolvable parent.
+	require.NoError(t, tb.ProcessOrderedBuildEvent(ctx, makeTargetConfiguredOBE(t, "inv-late-act", "//pkg:lib", 2)))
+	require.NoError(t, tb.ProcessOrderedBuildEvent(ctx, makeBuildFinishedOBE(t, "inv-late-act", 3, 0, "SUCCESS")))
 
-	spansBefore := sink.SpanCount()
+	preFlushBatches := len(sink.AllTraces())
+	preFlushSpans := sink.SpanCount()
 
-	// Action arrives after flush but before BuildMetrics — should be a no-op.
-	if err := tb.ProcessOrderedBuildEvent(ctx, makeActionOBE(t, "inv-late-act", "//pkg:lib", "Javac", 3, true)); err != nil {
-		t.Fatal(err)
-	}
+	// Action arrives after flush but before BuildMetrics.
+	require.NoError(t, tb.ProcessOrderedBuildEvent(ctx, makeActionOBE(t, "inv-late-act", "//pkg:lib", "Javac", 4, true)))
 
-	if sink.SpanCount() != spansBefore {
-		t.Errorf("expected no new spans after flush, got %d new", sink.SpanCount()-spansBefore)
-	}
+	allTraces := sink.AllTraces()
+	require.Len(t, allTraces, preFlushBatches+1, "expected a separate ConsumeTraces call for the late action")
+	require.Equal(t, preFlushSpans+1, sink.SpanCount(), "expected exactly one new span for the late action")
 
-	// BuildMetrics should still work normally after the dropped action.
-	if err := tb.ProcessOrderedBuildEvent(ctx, makeBuildMetricsOBE(t, "inv-late-act", 4, 10000, 5000)); err != nil {
-		t.Fatal(err)
-	}
-	if sink.SpanCount() != spansBefore+1 {
-		t.Errorf("expected 1 new span from BuildMetrics, got %d", sink.SpanCount()-spansBefore)
-	}
+	lateBatch := allTraces[len(allTraces)-1]
+	lateSpans := lateBatch.ResourceSpans().At(0).ScopeSpans().At(0).Spans()
+	require.Equal(t, 1, lateSpans.Len())
+	lateAction := lateSpans.At(0)
+	assert.Equal(t, "bazel.action Javac", lateAction.Name())
+	label, ok := lateAction.Attributes().Get("bazel.target.label")
+	require.True(t, ok)
+	assert.Equal(t, "//pkg:lib", label.Str())
+
+	// Parent should be the target span from the flushed batch (same SpanID,
+	// derived deterministically from the invocation uuid + label).
+	expectedParent := spanIDFromIdentity("uuid-late-act", "target", "//pkg:lib")
+	assert.Equal(t, expectedParent, lateAction.ParentSpanID(),
+		"late action should parent into the pre-flush target span")
+
+	// BuildMetrics should still work normally after the late action and
+	// increment the span count by one more batch.
+	require.NoError(t, tb.ProcessOrderedBuildEvent(ctx, makeBuildMetricsOBE(t, "inv-late-act", 5, 10000, 5000)))
+	require.Equal(t, preFlushSpans+2, sink.SpanCount(),
+		"expected one additional span from BuildMetrics on top of the late action")
+}
+
+func TestTraceBuilder_TestResultAfterBuildFinishedBeforeMetrics(t *testing.T) {
+	// TestResult arriving after BuildFinished (but before BuildMetrics)
+	// should emit a standalone bazel.test span parented under the existing
+	// target span when the target is known, mirroring the late-action path.
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	require.NoError(t, tb.ProcessOrderedBuildEvent(ctx, makeBuildStartedOBE(t, "inv-late-tr", "uuid-late-tr", "test", 1)))
+	require.NoError(t, tb.ProcessOrderedBuildEvent(ctx, makeTargetConfiguredOBE(t, "inv-late-tr", "//pkg:test", 2)))
+	require.NoError(t, tb.ProcessOrderedBuildEvent(ctx, makeBuildFinishedOBE(t, "inv-late-tr", 3, 0, "SUCCESS")))
+
+	preFlushBatches := len(sink.AllTraces())
+	preFlushSpans := sink.SpanCount()
+
+	require.NoError(t, tb.ProcessOrderedBuildEvent(ctx, makeTestResultOBE(t, "inv-late-tr", "//pkg:test", 4, bep.TestStatus_PASSED)))
+
+	allTraces := sink.AllTraces()
+	require.Len(t, allTraces, preFlushBatches+1)
+	require.Equal(t, preFlushSpans+1, sink.SpanCount())
+
+	lateSpans := allTraces[len(allTraces)-1].ResourceSpans().At(0).ScopeSpans().At(0).Spans()
+	require.Equal(t, 1, lateSpans.Len())
+	lateTest := lateSpans.At(0)
+	assert.Equal(t, "bazel.test", lateTest.Name())
+	label, ok := lateTest.Attributes().Get("bazel.target.label")
+	require.True(t, ok)
+	assert.Equal(t, "//pkg:test", label.Str())
+
+	expectedParent := spanIDFromIdentity("uuid-late-tr", "target", "//pkg:test")
+	assert.Equal(t, expectedParent, lateTest.ParentSpanID())
+
+	// A second late TestResult (e.g., retry attempt) should also emit.
+	require.NoError(t, tb.ProcessOrderedBuildEvent(ctx, makeTestResultOBE(t, "inv-late-tr", "//pkg:test", 5, bep.TestStatus_PASSED)))
+	require.Equal(t, preFlushSpans+2, sink.SpanCount(),
+		"each late TestResult should produce a separate span")
+}
+
+func TestTraceBuilder_LateActionWithoutKnownTarget(t *testing.T) {
+	// When a late action arrives for a label whose TargetConfigured never
+	// appeared pre-flush, the span parents to the root rather than being
+	// dropped. No post-flush reparenting — orphan tracking is disabled once
+	// the batch is emitted.
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	require.NoError(t, tb.ProcessOrderedBuildEvent(ctx, makeBuildStartedOBE(t, "inv-late-orphan", "uuid-late-orphan", "build", 1)))
+	require.NoError(t, tb.ProcessOrderedBuildEvent(ctx, makeBuildFinishedOBE(t, "inv-late-orphan", 2, 0, "SUCCESS")))
+
+	preFlushSpans := sink.SpanCount()
+
+	require.NoError(t, tb.ProcessOrderedBuildEvent(ctx, makeActionOBE(t, "inv-late-orphan", "//unknown:lib", "Javac", 3, true)))
+
+	require.Equal(t, preFlushSpans+1, sink.SpanCount())
+	lateBatch := sink.AllTraces()[len(sink.AllTraces())-1]
+	lateAction := lateBatch.ResourceSpans().At(0).ScopeSpans().At(0).Spans().At(0)
+	rootSpanID := spanIDFromIdentity("uuid-late-orphan", "root")
+	assert.Equal(t, rootSpanID, lateAction.ParentSpanID(),
+		"late action with no known target falls back to the root span")
 }
 
 func TestTraceBuilder_CumulativeCountersAcrossInvocations(t *testing.T) {
