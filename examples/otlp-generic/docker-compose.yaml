@@ -1,0 +1,18 @@
+services:
+  otelcol-bazel:
+    image: otelcol-bazel:latest
+    container_name: otelcol-bazel
+    command: ["--config", "/etc/otelcol-bazel/config.yaml"]
+    env_file:
+      - path: .env
+        required: true
+    volumes:
+      - ./collector-config.yaml:/etc/otelcol-bazel/config.yaml:ro
+    ports:
+      - "8082:8082"   # BES gRPC
+      - "13133:13133" # health_check
+      - "8888:8888"   # collector self-metrics (Prometheus)
+    # The upstream OTLP endpoint is reached directly from the collector
+    # container — no extra service needed. If you run a local collector or
+    # backend on the host, point OTLP_ENDPOINT at host.docker.internal:<port>.
+    restart: unless-stopped

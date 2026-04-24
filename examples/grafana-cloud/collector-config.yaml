@@ -1,0 +1,103 @@
+extensions:
+  health_check:
+    endpoint: "0.0.0.0:13133"
+  # Grafana Cloud authenticates OTLP requests with HTTP Basic auth. The
+  # username is the "Instance ID" shown on the OTLP endpoint settings page and
+  # the password is a Cloud Access Policy token with scope `traces:write`
+  # (and `metrics:write` / `logs:write` for the other pipelines).
+  basicauth/grafana_cloud:
+    client_auth:
+      username: ${env:GRAFANA_CLOUD_OTLP_USERNAME}
+      password: ${env:GRAFANA_CLOUD_OTLP_PASSWORD}
+
+receivers:
+  bes:
+    endpoint: "0.0.0.0:8082"
+    # PII controls — all default to false. Gating is by content: if
+    # include_hostname is false, no hostname-like attribute is emitted
+    # regardless of which pathway it arrived on. See docs/attributes.md
+    # for the full composition model.
+    # pii:
+    #   include_hostname: false            # bazel.host + host-like workspace/metadata keys
+    #   include_username: false            # bazel.user + user-like workspace/metadata keys
+    #   include_workspace_dir: false       # bazel.workspace_directory
+    #   include_working_dir: false         # bazel.working_directory
+    #   include_command_args: false        # bazel.action.command_line (slice)
+    #   include_action_output_paths: false # bazel.action.primary_output
+    #   include_workspace_status: false    # bazel.workspace.* pathway (per-key filtered)
+    #   include_build_metadata: false      # bazel.metadata.* pathway (per-key filtered)
+    #   include_command_line: false        # bazel.command_line (coarse only)
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 512
+    spike_limit_mib: 128
+  batch:
+    send_batch_size: 8192
+    send_batch_max_size: 8192
+    timeout: 200ms
+  # Uncomment and add to the traces pipeline (after memory_limiter, before batch)
+  # to drop spans by attribute. See the filterprocessor docs for OTTL syntax.
+  # filter/targets:
+  #   traces:
+  #     span:
+  #       - 'attributes["bazel.target.label"] != nil and IsMatch(attributes["bazel.target.label"], "^//third_party/")'
+  # Uncomment and add to each pipeline's processors list (after memory_limiter,
+  # before batch) to scrub sensitive attributes before export.
+  # redaction:
+  #   allow_all_keys: true
+  #   blocked_key_patterns:
+  #     - ".*user.*"
+  #     - ".*email.*"
+  #     - ".*token.*"
+  #   blocked_values:
+  #     - "(?i)bearer\\s+[A-Za-z0-9._\\-]+"
+  #     - "[A-Za-z0-9._%+\\-]+@[A-Za-z0-9.\\-]+\\.[A-Za-z]{2,}"
+  #   summary: debug
+
+exporters:
+  # Grafana Cloud OTLP endpoint is HTTP-only (gRPC is not exposed publicly).
+  # Override GRAFANA_CLOUD_OTLP_ENDPOINT in .env — e.g.
+  # https://otlp-gateway-prod-us-central-0.grafana.net/otlp
+  otlphttp/grafana_cloud:
+    endpoint: ${env:GRAFANA_CLOUD_OTLP_ENDPOINT}
+    auth:
+      authenticator: basicauth/grafana_cloud
+    retry_on_failure:
+      enabled: true
+      initial_interval: 5s
+      max_interval: 30s
+      max_elapsed_time: 300s
+    sending_queue:
+      enabled: true
+      num_consumers: 10
+      queue_size: 5000
+  debug:
+    verbosity: basic
+
+service:
+  extensions: [health_check, basicauth/grafana_cloud]
+  telemetry:
+    logs:
+      level: info
+    metrics:
+      readers:
+        - pull:
+            exporter:
+              prometheus:
+                host: "0.0.0.0"
+                port: 8888
+  pipelines:
+    traces:
+      receivers: [bes]
+      processors: [memory_limiter, batch]
+      exporters: [otlphttp/grafana_cloud, debug]
+    metrics:
+      receivers: [bes]
+      processors: [memory_limiter, batch]
+      exporters: [otlphttp/grafana_cloud]
+    logs:
+      receivers: [bes]
+      processors: [memory_limiter, batch]
+      exporters: [otlphttp/grafana_cloud]
