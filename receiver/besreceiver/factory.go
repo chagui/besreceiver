@@ -48,6 +48,7 @@ func createDefaultConfig() component.Config {
 			// unless the operator opts into a stricter level or adds rules.
 			DefaultLevel: DetailLevelVerbose,
 		},
+		Summary: SummaryConfig{Enabled: true},
 	}
 }
 

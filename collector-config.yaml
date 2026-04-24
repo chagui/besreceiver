@@ -54,6 +54,13 @@ receivers:
     #       detail_level: build_only
     #     - pattern: "//src/main/..."
     #       detail_level: verbose
+    # Summary counters stamped on the root bazel.build span
+    # (bazel.summary.total_targets, .total_actions, .failed_actions,
+    # .success_actions, .total_tests, .passed_tests, .failed_tests,
+    # .flaky_tests). Counts reflect the full build — a target dropped by
+    # the filter above still contributes to the totals. Default: enabled.
+    # summary:
+    #   enabled: true
 
 processors:
   memory_limiter:
