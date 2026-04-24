@@ -1,0 +1,47 @@
+[Unit]
+Description=besreceiver - Bazel BES to OpenTelemetry collector
+Documentation=https://github.com/chagui/besreceiver
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=besreceiver
+Group=besreceiver
+EnvironmentFile=-/etc/besreceiver/besreceiver.env
+Environment=BESRECEIVER_CONFIG=/etc/besreceiver/config.yaml
+ExecStart=/usr/local/bin/besreceiver --config=${BESRECEIVER_CONFIG}
+Restart=on-failure
+RestartSec=5s
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=30s
+LimitNOFILE=65536
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadWritePaths=/var/log/besreceiver /var/lib/besreceiver
+
+[Install]
+WantedBy=multi-user.target

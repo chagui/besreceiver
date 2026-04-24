@@ -1,5 +1,6 @@
 .PHONY: all build test test-short test-cover test-bench test-e2e lint vet clean fuzz fix generate ocb ci docker \
-       compose-build compose-up compose-down compose-clean example record record-fixtures agent-status nilaway deadcode changelog
+       compose-build compose-up compose-down compose-clean example record record-fixtures agent-status nilaway deadcode changelog \
+       install uninstall
 
 # Use absolute path: GNU Make 3.81 (macOS default) doesn't propagate export PATH to recipe shells.
 GOTESTSUM := $(shell go env GOPATH)/bin/gotestsum
@@ -136,3 +137,12 @@ agent-status:
 ## changelog: Generate CHANGELOG.md from conventional commits
 changelog:
 	git-cliff -o CHANGELOG.md
+
+## install: Install besreceiver as a system service (systemd on Linux, launchd on macOS); pass BINARY=path/to/besreceiver
+install:
+	sudo BESRECEIVER_BINARY="$(BINARY)" BESRECEIVER_CONFIG="$(BESRECEIVER_CONFIG)" \
+		packaging/install.sh $(INSTALL_ARGS)
+
+## uninstall: Remove the besreceiver service, binary, and config (pass CONFIRM=1 to actually remove)
+uninstall:
+	sudo packaging/uninstall.sh $(if $(CONFIRM),--yes,) $(UNINSTALL_ARGS)
