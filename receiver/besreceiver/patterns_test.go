@@ -61,7 +61,7 @@ func TestPatternExpanded_SingleEvent_ProducesOneEntry(t *testing.T) {
 	assert.Equal(t, int64(3), entries["//foo/..."])
 }
 
-func TestPatternExpanded_MultiplePatterns_EmitsEntryPerPattern(t *testing.T) {
+func TestPatternExpanded_MultiplePatterns_EvenSplitsTargetCount(t *testing.T) {
 	sink := new(consumertest.TracesSink)
 	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
 	tb.Start()
@@ -70,8 +70,12 @@ func TestPatternExpanded_MultiplePatterns_EmitsEntryPerPattern(t *testing.T) {
 
 	processEvents(ctx, t, tb,
 		makeBuildStartedOBE(t, "inv-pat-multi", "uuid-pat-multi", "build", 1),
-		// One event carrying two patterns — each gets target_count=2.
-		makePatternExpandedOBE(t, "inv-pat-multi", 2, []string{"//a/...", "//b/..."}, 2),
+		// One event with two patterns and 4 TargetConfigured children. The
+		// proto carries no per-pattern attribution, so the receiver divides
+		// evenly: floor(4/2)=2 per pattern. Per-event sum equals the child
+		// count (no N×M inflation across the slice).
+		makePatternExpandedOBE(t, "inv-pat-multi", 2, []string{"//a/...", "//b/..."}, 4),
+		// Single-pattern events keep the exact count.
 		makePatternExpandedOBE(t, "inv-pat-multi", 3, []string{"//c:tgt"}, 1),
 		makeBuildFinishedOBE(t, "inv-pat-multi", 4, 0, "SUCCESS"),
 	)
@@ -84,6 +88,92 @@ func TestPatternExpanded_MultiplePatterns_EmitsEntryPerPattern(t *testing.T) {
 		"//b/...": 2,
 		"//c:tgt": 1,
 	}, entries)
+}
+
+// TestPatternExpanded_NonTargetConfiguredChildren_NotCounted verifies that
+// only TargetConfigured ids contribute to target_count. PatternExpanded
+// children of nested patterns and unconfigured-label children (failure
+// markers) must not inflate the count of resolved targets.
+func TestPatternExpanded_NonTargetConfiguredChildren_NotCounted(t *testing.T) {
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-pat-mixed", "uuid-pat-mixed", "build", 1),
+		// 3 TargetConfigured + 2 nested-pattern + 4 unconfigured-label children.
+		// Only the 3 TargetConfigured ids count toward target_count.
+		makePatternExpandedMixedChildrenOBE(t, "inv-pat-mixed", 2, []string{"//top/..."}, 3, 2, 4),
+		makeBuildFinishedOBE(t, "inv-pat-mixed", 3, 0, "SUCCESS"),
+	)
+
+	span := findRootSpan(t, sink)
+	entries, ok := patternEntries(t, span)
+	require.True(t, ok)
+	assert.Equal(t, map[string]int64{"//top/...": 3}, entries)
+}
+
+// TestPatternExpanded_PatternSkipped_EmitsSkippedAttribute verifies that
+// pattern_skipped events route to bazel.patterns_skipped (not bazel.patterns)
+// — Bazel emits these under --keep_going for patterns whose expansion was
+// skipped. They have no target_count by definition.
+func TestPatternExpanded_PatternSkipped_EmitsSkippedAttribute(t *testing.T) {
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-pat-skipped", "uuid-pat-skipped", "test", 1),
+		makePatternExpandedOBE(t, "inv-pat-skipped", 2, []string{"//ok/..."}, 2),
+		makePatternSkippedOBE(t, "inv-pat-skipped", 3, []string{"//missing/..."}),
+		makePatternSkippedOBE(t, "inv-pat-skipped", 4, []string{"//also/missing"}),
+		makeBuildFinishedOBE(t, "inv-pat-skipped", 5, 0, "SUCCESS"),
+	)
+
+	span := findRootSpan(t, sink)
+	entries, ok := patternEntries(t, span)
+	require.True(t, ok, "expected bazel.patterns for the successful expansion")
+	assert.Equal(t, map[string]int64{"//ok/...": 2}, entries)
+
+	skipped, sok := span.Attributes().Get("bazel.patterns_skipped")
+	require.True(t, sok, "expected bazel.patterns_skipped attribute")
+	require.Equal(t, pcommon.ValueTypeSlice, skipped.Type())
+	got := make([]string, 0, skipped.Slice().Len())
+	for i := range skipped.Slice().Len() {
+		got = append(got, skipped.Slice().At(i).Str())
+	}
+	assert.ElementsMatch(t, []string{"//missing/...", "//also/missing"}, got)
+}
+
+// TestPatternExpanded_PatternSkippedOnly_NoPatternsAttribute verifies that
+// when only pattern_skipped events arrive (no successful expansions), the
+// bazel.patterns attribute is absent — skipped patterns alone do not
+// promise any targets ran.
+func TestPatternExpanded_PatternSkippedOnly_NoPatternsAttribute(t *testing.T) {
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-pat-skip-only", "uuid-pat-skip-only", "build", 1),
+		makePatternSkippedOBE(t, "inv-pat-skip-only", 2, []string{"//gone/..."}),
+		makeBuildFinishedOBE(t, "inv-pat-skip-only", 3, 0, "SUCCESS"),
+	)
+
+	span := findRootSpan(t, sink)
+	_, ok := span.Attributes().Get("bazel.patterns")
+	assert.False(t, ok, "bazel.patterns must be absent when no successful expansions arrived")
+	skipped, sok := span.Attributes().Get("bazel.patterns_skipped")
+	require.True(t, sok)
+	require.Equal(t, pcommon.ValueTypeSlice, skipped.Type())
+	require.Equal(t, 1, skipped.Slice().Len())
+	assert.Equal(t, "//gone/...", skipped.Slice().At(0).Str())
 }
 
 func TestPatternExpanded_RepeatedPattern_AggregatesTargetCount(t *testing.T) {
@@ -190,6 +280,35 @@ func TestPatternExpanded_OverCap_TruncatedWithWarning(t *testing.T) {
 	assert.Equal(t, "bazel.patterns", fields["attribute"])
 	assert.Equal(t, int64(5), fields["original_count"])
 	assert.Equal(t, int64(3), fields["kept"])
+}
+
+// TestPatternExpanded_PostFlush_Dropped verifies that a PatternExpanded
+// event arriving after the root span has been flushed (between
+// BuildFinished and BuildMetrics, when state.flushed is set) does not
+// retroactively mutate bazel.patterns. The receiver follows the
+// workspace_status / build_metadata buffering policy: pre-finalize-only.
+func TestPatternExpanded_PostFlush_Dropped(t *testing.T) {
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-pat-postflush", "uuid-pat-postflush", "build", 1),
+		makePatternExpandedOBE(t, "inv-pat-postflush", 2, []string{"//pre"}, 2),
+		makeBuildFinishedOBE(t, "inv-pat-postflush", 3, 0, "SUCCESS"),
+		// Arrives after finalize; must not appear in bazel.patterns.
+		makePatternExpandedOBE(t, "inv-pat-postflush", 4, []string{"//post"}, 5),
+		makePatternSkippedOBE(t, "inv-pat-postflush", 5, []string{"//also-post"}),
+	)
+
+	span := findRootSpan(t, sink)
+	entries, ok := patternEntries(t, span)
+	require.True(t, ok)
+	assert.Equal(t, map[string]int64{"//pre": 2}, entries)
+	_, sok := span.Attributes().Get("bazel.patterns_skipped")
+	assert.False(t, sok, "post-flush pattern_skipped must not retro-stamp the root span")
 }
 
 func TestPatternExpanded_DefaultCapIs50(t *testing.T) {

@@ -358,7 +358,7 @@ func (tb *TraceBuilder) processEvent(ctx context.Context, invocations map[string
 
 // eventTypeName returns a short name for the BEP event type, used as a metric attribute.
 //
-//nolint:gocyclo // Flat payload dispatch mirrors processEvent; grows with handled types.
+//nolint:gocyclo,cyclop // Flat payload dispatch mirrors processEvent; grows with handled types.
 func eventTypeName(event *bep.BuildEvent) string {
 	switch event.GetPayload().(type) {
 	case *bep.BuildEvent_Started:
@@ -396,6 +396,13 @@ func eventTypeName(event *bep.BuildEvent) string {
 	case *bep.BuildEvent_Fetch:
 		return "fetch"
 	case *bep.BuildEvent_Expanded:
+		// PatternExpanded payloads ride on one of two id shapes; surface them
+		// as distinct event_type labels so bes.events.processed counts them
+		// separately. Other Expanded id-shape combinations (none defined
+		// today) fall back to the generic label.
+		if event.GetId().GetPatternSkipped() != nil {
+			return "pattern_skipped"
+		}
 		return "pattern_expanded"
 	default:
 		return "other"
@@ -680,20 +687,40 @@ func (tb *TraceBuilder) handleWorkspaceStatus(_ context.Context, invocations map
 	return nil
 }
 
-// handlePatternExpanded aggregates a PatternExpanded event onto the
-// invocation state for later emission as bazel.patterns on the root span.
-// Pattern strings come from BuildEventId.pattern.pattern (repeated); the
-// target count is the number of children on the event — each child is a
-// target/pattern the expansion resolved to. Empty pattern lists and zero-
-// target expansions are dropped. Post-flush arrivals are ignored (matches
-// the buffering semantics of workspace_status / build_metadata).
+// handlePatternExpanded routes PatternExpanded payloads to the invocation
+// state. The payload rides on one of two id shapes:
+//
+//   - id.pattern → the patterns successfully expanded; aggregated as
+//     bazel.patterns {pattern, target_count}. target_count is the number of
+//     TargetConfigured children only (nested patterns and unconfigured-label
+//     failure markers do not count as resolved targets).
+//   - id.pattern_skipped → patterns Bazel skipped under --keep_going;
+//     aggregated as bazel.patterns_skipped (Slice[string]). No target_count
+//     because skipped patterns by definition did not expand to targets.
+//
+// Empty pattern strings and zero-target expansions are dropped. Post-flush
+// arrivals are ignored (matches workspace_status / build_metadata).
 func (tb *TraceBuilder) handlePatternExpanded(_ context.Context, invocations map[string]*invocationState, invocationID string, event *bep.BuildEvent) error {
 	state := invocations[invocationID]
 	if state == nil {
 		return nil
 	}
-	patterns := event.GetId().GetPattern().GetPattern()
-	targetCount := int64(len(event.GetChildren()))
+	id := event.GetId()
+	if skipped := id.GetPatternSkipped(); skipped != nil {
+		state.addPatternsSkipped(skipped.GetPattern())
+		tb.logger.Debug("Pattern skipped",
+			zap.String("invocation_id", invocationID),
+			zap.Int("patterns", len(skipped.GetPattern())),
+		)
+		return nil
+	}
+	patterns := id.GetPattern().GetPattern()
+	var targetCount int64
+	for _, child := range event.GetChildren() {
+		if child.GetTargetConfigured() != nil {
+			targetCount++
+		}
+	}
 	state.addPatternExpanded(patterns, targetCount)
 	tb.logger.Debug("Pattern expanded",
 		zap.String("invocation_id", invocationID),

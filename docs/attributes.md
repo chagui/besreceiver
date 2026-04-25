@@ -57,7 +57,8 @@ without `BuildFinished`, from the reaper path.
 | `bazel.run.environment`                         | Slice[Map]         | `ExecRequestConstructed.environment_variable` (only on `bazel run`) — `{name, value}` entries sorted by name, capped at 50; **PII**, requires `include_run_environment` |
 | `bazel.run.environment_variable_to_clear`       | Slice[string]      | `ExecRequestConstructed.environment_variable_to_clear` — env names Bazel will unset before exec; sorted, capped at 50; **PII**, requires `include_run_environment` |
 | `bazel.run.should_exec`                         | bool               | `ExecRequestConstructed.should_exec` (only on `bazel run`) — `false` means Bazel wrote a script via `--script_path` instead of execing |
-| `bazel.patterns`                                | Slice[Map]         | `PatternExpanded` — one entry per requested pattern: `{pattern, target_count}`. Aggregated across events; capped by `high_cardinality_caps.patterns` (default 50). |
+| `bazel.patterns`                                | Slice[Map]         | `PatternExpanded` (id `pattern`) — one entry per successfully expanded pattern: `{pattern, target_count}`. `target_count` counts only `TargetConfigured` children. Aggregated across events; capped by `high_cardinality_caps.patterns` (default 50). |
+| `bazel.patterns_skipped`                        | Slice[string]      | `PatternExpanded` (id `pattern_skipped`) — patterns Bazel reported as skipped under `--keep_going`. No `target_count` (skipped patterns did not expand). Sorted, deduplicated; shares the `high_cardinality_caps.patterns` cap. |
 
 The `bazel.run.*` group is populated only for `bazel run` invocations, where
 Bazel emits `ExecRequestConstructed` after the build succeeds and before the
@@ -89,14 +90,30 @@ emits a Warn log with `invocation_id`, `attribute`, `original_count`, and
 Non-UTF-8 entries are silently skipped to avoid OTLP/JSON exporter rejection.
 
 `bazel.patterns` captures what the user asked for: e.g. a `bazel test //...`
-invocation that fans out to 1,400 tests emits a single entry
-`{pattern: "//...", target_count: 1400}`. Patterns are aggregated by
-pattern string across multiple `PatternExpanded` events (unlikely in
-practice, but preserved for correctness). Empty pattern strings and
-zero-target expansions are skipped; when no `PatternExpanded` event
-arrives the attribute is absent entirely. Exceeding
+invocation whose top-level pattern resolves to a few hundred test targets
+emits one entry `{pattern: "//...", target_count: <N>}` where `N` is the
+number of `TargetConfigured` children Bazel reports for the expansion (the
+exact count of targets the receiver will see — not necessarily the count of
+test cases that ran, since each target can fan out at runtime). Nested
+`PatternExpanded` ids and `UnconfiguredLabel` failure markers among the
+event's children are excluded from `target_count`. Patterns are aggregated
+by pattern string across multiple `PatternExpanded` events. The rare
+multi-pattern event (one BEP event carrying N>1 patterns) has no
+per-pattern attribution in the proto, so its `target_count` is divided
+evenly across the non-empty patterns (`floor(targetCount / N)`); single-
+pattern events — Bazel's dominant case — keep the exact count. Empty
+pattern strings and zero-target expansions are skipped; when no
+`PatternExpanded` event arrives the attribute is absent entirely. Exceeding
 `high_cardinality_caps.patterns` truncates in sorted pattern order and
 emits a Warn log with the invocation id, original count, and kept count.
+
+`bazel.patterns_skipped` records pattern strings carried on `pattern_skipped`
+ids — Bazel emits these for parts of a top-level pattern whose expansion
+was skipped, typically under `--keep_going` after an earlier failure. They
+have no `target_count` (skipped patterns did not resolve to targets). The
+attribute is a deduplicated `Slice[string]` aggregated across events;
+absent when no skipped expansions arrived. The cap is shared with
+`bazel.patterns` so operators tune one knob.
 
 Key sanitization for `bazel.workspace.*` and `bazel.metadata.*`: lowercase,
 collapse whitespace to `_`, strip characters outside `[a-z0-9_.]`, trim

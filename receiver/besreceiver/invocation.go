@@ -93,6 +93,13 @@ type invocationState struct {
 	// writeRootSpan. Capped at caps.Patterns entries with a warning log.
 	patterns map[string]int64
 
+	// patternsSkipped buffers the set of patterns Bazel reported via
+	// pattern_skipped ids (--keep_going partial expansions). Keyed for
+	// dedup; emitted as bazel.patterns_skipped Slice[string] on the root
+	// span. Reuses caps.Patterns for the limit — same magnitude as
+	// patterns and operators tune one knob.
+	patternsSkipped map[string]struct{}
+
 	// configurations maps config id → Configuration payload. Populated by
 	// handleConfiguration so handleTargetConfigured can stamp config attrs
 	// on the target span at creation time. No back-patching: if a
@@ -572,6 +579,7 @@ func (s *invocationState) writeRootSpan(finished *bep.BuildFinished) []truncatio
 	}
 
 	truncs = s.applyPatternAttrs(span, truncs)
+	truncs = s.applyPatternsSkippedAttrs(span, truncs)
 	return truncs
 }
 
@@ -904,17 +912,37 @@ func (s *invocationState) addBuildMetadata(md map[string]string) {
 // addPatternExpanded aggregates a PatternExpanded event onto the invocation
 // state for emission as bazel.patterns on the root span. patterns is the
 // list of pattern strings from BuildEventId_PatternExpandedId (a single BEP
-// event may carry multiple patterns); targetCount is the number of targets
-// the expansion resolved to (len of the event's children). Empty patterns
-// and zero-target expansions are skipped. Aggregation sums target_count for
-// duplicate pattern keys. The cap is enforced at emission time in
-// applyPatternAttrs, not here, so late-arriving low-cardinality aggregates
-// aren't silently dropped.
+// event may carry multiple patterns); targetCount is the number of
+// TargetConfigured children on the event. Empty patterns and zero-target
+// expansions are skipped.
+//
+// Multi-pattern events have no per-pattern attribution in the proto, so the
+// count is divided evenly across the event's non-empty patterns
+// (floor(targetCount / N)). The per-event sum across the slice never
+// exceeds targetCount, eliminating the N×M inflation an earlier
+// implementation produced. Single-pattern events — Bazel's dominant case —
+// keep the exact count. Same-key contributions across events are summed.
+//
+// The cap is enforced at emission time in applyPatternAttrs, not here, so
+// late-arriving low-cardinality aggregates aren't silently dropped.
 func (s *invocationState) addPatternExpanded(patterns []string, targetCount int64) {
 	if s.flushed {
 		return
 	}
 	if targetCount <= 0 {
+		return
+	}
+	nonEmpty := 0
+	for _, p := range patterns {
+		if p != "" {
+			nonEmpty++
+		}
+	}
+	if nonEmpty == 0 {
+		return
+	}
+	share := targetCount / int64(nonEmpty)
+	if share == 0 {
 		return
 	}
 	if s.patterns == nil {
@@ -924,7 +952,27 @@ func (s *invocationState) addPatternExpanded(patterns []string, targetCount int6
 		if p == "" {
 			continue
 		}
-		s.patterns[p] += targetCount
+		s.patterns[p] += share
+	}
+}
+
+// addPatternsSkipped records pattern strings carried on a pattern_skipped
+// event id. Bazel emits these for parts of a pattern whose expansion was
+// skipped under --keep_going. Empty strings are dropped. The cap is
+// enforced at emission time in applyPatternsSkippedAttrs (shares
+// caps.Patterns with bazel.patterns).
+func (s *invocationState) addPatternsSkipped(patterns []string) {
+	if s.flushed {
+		return
+	}
+	if s.patternsSkipped == nil {
+		s.patternsSkipped = make(map[string]struct{})
+	}
+	for _, p := range patterns {
+		if p == "" {
+			continue
+		}
+		s.patternsSkipped[p] = struct{}{}
 	}
 }
 
@@ -1149,6 +1197,42 @@ func (s *invocationState) applyPatternAttrs(span ptrace.Span, truncs []truncatio
 	if kept < original {
 		truncs = append(truncs, truncationRecord{
 			attribute: "bazel.patterns",
+			original:  original,
+			kept:      kept,
+		})
+	}
+	return truncs
+}
+
+// applyPatternsSkippedAttrs emits bazel.patterns_skipped as a Slice[string]
+// on the root span from buffered pattern_skipped ids. Patterns are sorted
+// for stable truncation; the cap is shared with bazel.patterns. Absent when
+// no pattern_skipped events arrived.
+func (s *invocationState) applyPatternsSkippedAttrs(span ptrace.Span, truncs []truncationRecord) []truncationRecord {
+	if len(s.patternsSkipped) == 0 {
+		return truncs
+	}
+	keys := make([]string, 0, len(s.patternsSkipped))
+	for k := range s.patternsSkipped {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	limit := s.caps.withDefaults().Patterns
+	original := len(keys)
+	kept := original
+	if limit > 0 && original > limit {
+		keys = keys[:limit]
+		kept = limit
+	}
+
+	slice := span.Attributes().PutEmptySlice("bazel.patterns_skipped")
+	for _, k := range keys {
+		slice.AppendEmpty().SetStr(k)
+	}
+	if kept < original {
+		truncs = append(truncs, truncationRecord{
+			attribute: "bazel.patterns_skipped",
 			original:  original,
 			kept:      kept,
 		})
