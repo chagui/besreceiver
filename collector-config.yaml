@@ -34,7 +34,8 @@ receivers:
     #   include_username: false            # bazel.user + user-like workspace/metadata keys
     #   include_workspace_dir: false       # bazel.workspace_directory
     #   include_working_dir: false         # bazel.working_directory
-    #   include_command_args: false        # bazel.action.command_line (slice)
+    #   include_command_args: false        # bazel.action.command_line + bazel.run.argv
+    #   include_run_environment: false     # bazel.run.environment + bazel.run.environment_variable_to_clear
     #   include_action_output_paths: false # bazel.action.primary_output
     #   include_workspace_status: false    # bazel.workspace.* pathway (per-key filtered)
     #   include_build_metadata: false      # bazel.metadata.* pathway (per-key filtered)

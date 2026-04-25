@@ -186,9 +186,16 @@ type PIIConfig struct {
 	// any bazel.workspace/metadata.<k> where k is "working_dir" or
 	// "working_directory".
 	IncludeWorkingDir bool `mapstructure:"include_working_dir"`
-	// IncludeCommandArgs gates bazel.action.command_line on action spans.
-	// For large monorepos this can materially inflate span payload size.
+	// IncludeCommandArgs gates bazel.action.command_line on action spans
+	// and bazel.run.argv on the root span (`bazel run` only). For large
+	// monorepos this can materially inflate span payload size.
 	IncludeCommandArgs bool `mapstructure:"include_command_args"`
+	// IncludeRunEnvironment gates bazel.run.environment and
+	// bazel.run.environment_variable_to_clear on the root span (`bazel run`
+	// only). Run environments routinely carry credentials, tokens, and
+	// host-derived secrets, so this flag is separate from IncludeCommandArgs:
+	// operators can surface the argv without exposing the env.
+	IncludeRunEnvironment bool `mapstructure:"include_run_environment"`
 	// IncludeActionOutputPaths gates bazel.action.primary_output on action spans.
 	IncludeActionOutputPaths bool `mapstructure:"include_action_output_paths"`
 	// IncludeWorkspaceStatus opens the bazel.workspace.* pathway (items from

@@ -5,11 +5,15 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/collector/consumer"
+	"go.opentelemetry.io/collector/consumer/consumertest"
 	"go.opentelemetry.io/collector/pdata/pmetric"
+	"go.opentelemetry.io/collector/pdata/ptrace"
 	pb "google.golang.org/genproto/googleapis/devtools/build/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/metadata"
@@ -480,30 +484,35 @@ func makeBuildMetricsOBE(t testing.TB, invID string, seqNum, wallMs, cpuMs int64
 }
 
 // makeExecRequestConstructedOBE builds an ExecRequestConstructed event for
-// `bazel run` tests. argv and envVars are emitted as-is (argv as a list of
-// strings, env as a list of name=value pairs). workingDir and shouldExec are
-// set directly on the payload. The BEP proto types these fields as bytes, so
-// we cast through []byte to match the generated Go shape.
+// `bazel run` tests. argv goes through verbatim; env entries are emitted in
+// the order Go's map iteration produces them — the receiver is responsible
+// for sorting, so this exposes any non-determinism there. Working dir and
+// shouldExec are set directly. The BEP proto types these fields as bytes,
+// so we cast through []byte to match the generated Go shape.
 func makeExecRequestConstructedOBE(t testing.TB, invID string, seqNum int64, argv []string, workingDir string, env map[string]string, shouldExec bool) *pb.OrderedBuildEvent {
+	t.Helper()
+	return makeExecRequestConstructedOBEFull(t, invID, seqNum, argv, workingDir, env, nil, shouldExec)
+}
+
+// makeExecRequestConstructedOBEFull is the full-arity helper exposing
+// environment_variable_to_clear (proto field 4). Used by tests that need
+// the unset list; most tests pass nil and use the simpler wrapper above.
+func makeExecRequestConstructedOBEFull(t testing.TB, invID string, seqNum int64, argv []string, workingDir string, env map[string]string, envToClear []string, shouldExec bool) *pb.OrderedBuildEvent {
 	t.Helper()
 	argvBytes := make([][]byte, 0, len(argv))
 	for _, a := range argv {
 		argvBytes = append(argvBytes, []byte(a))
 	}
-	// Sort env by key for deterministic emission — BEP map iteration order is
-	// non-deterministic and assertions on the environment slice compare by
-	// index.
-	keys := make([]string, 0, len(env))
-	for k := range env {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
 	envVars := make([]*bep.EnvironmentVariable, 0, len(env))
-	for _, k := range keys {
+	for k, v := range env {
 		envVars = append(envVars, &bep.EnvironmentVariable{
 			Name:  []byte(k),
-			Value: []byte(env[k]),
+			Value: []byte(v),
 		})
+	}
+	clearBytes := make([][]byte, 0, len(envToClear))
+	for _, n := range envToClear {
+		clearBytes = append(clearBytes, []byte(n))
 	}
 	return makeOrderedBuildEvent(t, invID, seqNum, &bep.BuildEvent{
 		Id: &bep.BuildEventId{
@@ -513,10 +522,11 @@ func makeExecRequestConstructedOBE(t testing.TB, invID string, seqNum int64, arg
 		},
 		Payload: &bep.BuildEvent_ExecRequest{
 			ExecRequest: &bep.ExecRequestConstructed{
-				Argv:                argvBytes,
-				WorkingDirectory:    []byte(workingDir),
-				EnvironmentVariable: envVars,
-				ShouldExec:          shouldExec,
+				Argv:                       argvBytes,
+				WorkingDirectory:           []byte(workingDir),
+				EnvironmentVariable:        envVars,
+				EnvironmentVariableToClear: clearBytes,
+				ShouldExec:                 shouldExec,
 			},
 		},
 	})
@@ -636,6 +646,42 @@ func makeBuildFinishedReq(t testing.TB, invID string, seqNum int64, code int32, 
 			},
 		},
 	})
+}
+
+// flakyTracesConsumer fails ConsumeTraces N times then forwards to a real
+// sink. Used to exercise retryable-error paths without hand-rolling a
+// `consumer.Traces` impl in each test.
+type flakyTracesConsumer struct {
+	sink *consumertest.TracesSink
+
+	mu      sync.Mutex
+	nextErr error
+}
+
+func (f *flakyTracesConsumer) Capabilities() consumer.Capabilities {
+	return consumer.Capabilities{MutatesData: false}
+}
+
+func (f *flakyTracesConsumer) ConsumeTraces(ctx context.Context, td ptrace.Traces) error {
+	f.mu.Lock()
+	err := f.nextErr
+	f.nextErr = nil
+	f.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	if f.sink == nil {
+		f.sink = new(consumertest.TracesSink)
+	}
+	return f.sink.ConsumeTraces(ctx, td)
+}
+
+// failNext arms the consumer to return err once on the next ConsumeTraces
+// call; subsequent calls forward to the embedded sink.
+func (f *flakyTracesConsumer) failNext(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.nextErr = err
 }
 
 func makeBuildMetricsReq(t testing.TB, invID string, seqNum, wallMs, cpuMs int64) *pb.PublishBuildToolEventStreamRequest {
