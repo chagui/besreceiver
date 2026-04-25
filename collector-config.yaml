@@ -39,6 +39,7 @@ receivers:
     #   include_workspace_status: false    # bazel.workspace.* pathway (per-key filtered)
     #   include_build_metadata: false      # bazel.metadata.* pathway (per-key filtered)
     #   include_command_line: false        # bazel.command_line (coarse only)
+    #   include_fetch_query_string: false  # preserve query string on bazel.fetch.url (default off — strips pre-signed S3/GCS creds)
     # Per-target detail level filtering. default_level applies when no rule
     # matches; rules are evaluated in order and first match wins. Levels:
     #   drop       emits only the root bazel.build and bazel.metrics spans

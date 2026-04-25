@@ -3306,3 +3306,410 @@ func TestExecRequest_BazelBuild_NoAttrsEmitted(t *testing.T) {
 		assert.False(t, has, "bazel build must not emit %s (no ExecRequestConstructed event)", key)
 	}
 }
+
+// findFetchSpans returns every bazel.fetch span across all trace batches
+// in the sink.
+func findFetchSpans(t *testing.T, sink *consumertest.TracesSink) []ptrace.Span {
+	t.Helper()
+	var out []ptrace.Span
+	for _, tr := range sink.AllTraces() {
+		for i := range tr.ResourceSpans().Len() {
+			rs := tr.ResourceSpans().At(i)
+			for j := range rs.ScopeSpans().Len() {
+				ss := rs.ScopeSpans().At(j)
+				for k := range ss.Spans().Len() {
+					s := ss.Spans().At(k)
+					if s.Name() == "bazel.fetch" {
+						out = append(out, s)
+					}
+				}
+			}
+		}
+	}
+	return out
+}
+
+// logRecordsByEventName returns every log record across the sink whose
+// `event.name` attribute matches the given value. Tests should not unroll
+// the four-level pdata iteration manually.
+func logRecordsByEventName(t *testing.T, sink *consumertest.LogsSink, eventName string) []plog.LogRecord {
+	t.Helper()
+	var out []plog.LogRecord
+	for _, lg := range sink.AllLogs() {
+		for i := range lg.ResourceLogs().Len() {
+			rl := lg.ResourceLogs().At(i)
+			for j := range rl.ScopeLogs().Len() {
+				sl := rl.ScopeLogs().At(j)
+				for k := range sl.LogRecords().Len() {
+					lr := sl.LogRecords().At(k)
+					if evt, ok := lr.Attributes().Get("event.name"); ok && evt.Str() == eventName {
+						out = append(out, lr)
+					}
+				}
+			}
+		}
+	}
+	return out
+}
+
+func TestTraceBuilder_Fetch_Success(t *testing.T) {
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-fetch-ok", "uuid-fetch-ok", "build", 1),
+		makeFetchOBE(t, "inv-fetch-ok", "https://example.com/lib.tar.gz", 2, true),
+		makeBuildFinishedOBE(t, "inv-fetch-ok", 3, 0, "SUCCESS"),
+	)
+
+	spans := findFetchSpans(t, sink)
+	require.Len(t, spans, 1, "expected exactly one bazel.fetch span")
+
+	span := spans[0]
+	url, ok := span.Attributes().Get("bazel.fetch.url")
+	require.True(t, ok, "missing bazel.fetch.url")
+	assert.Equal(t, "https://example.com/lib.tar.gz", url.Str())
+
+	success, ok := span.Attributes().Get("bazel.fetch.success")
+	require.True(t, ok, "missing bazel.fetch.success")
+	assert.True(t, success.Bool())
+
+	assert.Equal(t, ptrace.StatusCodeUnset, span.Status().Code(),
+		"successful fetch should not set Error status")
+
+	// Parented to root.
+	root := findRootSpan(t, sink)
+	assert.Equal(t, root.SpanID(), span.ParentSpanID(), "fetch span must be parented to bazel.build root")
+	assert.Equal(t, root.TraceID(), span.TraceID(), "fetch span must share traceID with root")
+}
+
+func TestTraceBuilder_Fetch_Failure(t *testing.T) {
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-fetch-fail", "uuid-fetch-fail", "build", 1),
+		makeFetchOBE(t, "inv-fetch-fail", "https://example.com/broken.tar.gz", 2, false),
+		makeBuildFinishedOBE(t, "inv-fetch-fail", 3, 0, "SUCCESS"),
+	)
+
+	spans := findFetchSpans(t, sink)
+	require.Len(t, spans, 1)
+
+	span := spans[0]
+	success, ok := span.Attributes().Get("bazel.fetch.success")
+	require.True(t, ok)
+	assert.False(t, success.Bool())
+
+	assert.Equal(t, ptrace.StatusCodeError, span.Status().Code(),
+		"failed fetch must set Error status")
+	assert.Equal(t, "fetch failed: https://example.com/broken.tar.gz", span.Status().Message())
+}
+
+func TestTraceBuilder_Fetch_SuppressedByFilter_BuildOnly(t *testing.T) {
+	// Acceptance criterion: drop / build_only filter levels suppress the
+	// per-fetch span. Fetches are per-invocation detail, so they're gated
+	// the same way targets are.
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{
+		Filter: FilterConfig{DefaultLevel: DetailLevelBuildOnly},
+	})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-fetch-bo", "uuid-fetch-bo", "build", 1),
+		makeFetchOBE(t, "inv-fetch-bo", "https://example.com/lib.tar.gz", 2, true),
+		makeBuildFinishedOBE(t, "inv-fetch-bo", 3, 0, "SUCCESS"),
+	)
+
+	spans := findFetchSpans(t, sink)
+	assert.Empty(t, spans, "build_only default_level must suppress bazel.fetch spans")
+}
+
+func TestTraceBuilder_Fetch_SuppressedByFilter_Drop(t *testing.T) {
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{
+		Filter: FilterConfig{DefaultLevel: DetailLevelDrop},
+	})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-fetch-drop", "uuid-fetch-drop", "build", 1),
+		makeFetchOBE(t, "inv-fetch-drop", "https://example.com/lib.tar.gz", 2, true),
+		makeBuildFinishedOBE(t, "inv-fetch-drop", 3, 0, "SUCCESS"),
+	)
+
+	spans := findFetchSpans(t, sink)
+	assert.Empty(t, spans, "drop default_level must suppress bazel.fetch spans")
+}
+
+func TestTraceBuilder_Fetch_BeforeBuildStarted_Dropped(t *testing.T) {
+	// Fetch before BuildStarted arrives with no invocation state. The event
+	// must be silently dropped without emitting any span or erroring.
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	// Send Fetch first; no BuildStarted has set up state yet.
+	require.NoError(t, tb.ProcessOrderedBuildEvent(ctx,
+		makeFetchOBE(t, "inv-fetch-early", "https://example.com/early.tar.gz", 1, true)))
+
+	assert.Empty(t, findFetchSpans(t, sink),
+		"fetch before BuildStarted must emit no span")
+	assert.Equal(t, 0, sink.SpanCount(), "no spans of any kind should be emitted")
+}
+
+func TestTraceBuilder_Fetch_MissingURL_NoSpan(t *testing.T) {
+	// A Fetch event without a URL is dropped per spec.
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-fetch-no-url", "uuid-fetch-no-url", "build", 1),
+		makeFetchOBE(t, "inv-fetch-no-url", "", 2, true),
+		makeBuildFinishedOBE(t, "inv-fetch-no-url", 3, 0, "SUCCESS"),
+	)
+
+	assert.Empty(t, findFetchSpans(t, sink),
+		"fetch with empty URL must emit no span")
+}
+
+// TestTraceBuilder_Fetch_RedactsUserinfo — URLs with embedded credentials
+// (`user:token@host`) are redacted by default. Both the span attribute
+// and the log record body must carry the cleaned URL; never the raw
+// secret-bearing form.
+func TestTraceBuilder_Fetch_RedactsUserinfo(t *testing.T) {
+	sink := new(consumertest.TracesSink)
+	logsSink := new(consumertest.LogsSink)
+	tb := NewTraceBuilder(sink, logsSink, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-redact", "uuid-redact", "build", 1),
+		makeFetchOBE(t, "inv-redact", "https://alice:s3cret@mirror.example.com/lib.tar.gz", 2, true),
+		makeBuildFinishedOBE(t, "inv-redact", 3, 0, "SUCCESS"),
+	)
+
+	spans := findFetchSpans(t, sink)
+	require.Len(t, spans, 1)
+	url, _ := spans[0].Attributes().Get("bazel.fetch.url")
+	assert.NotContains(t, url.Str(), "alice", "userinfo username must be stripped")
+	assert.NotContains(t, url.Str(), "s3cret", "userinfo password must be stripped")
+	assert.Contains(t, url.Str(), "mirror.example.com", "host must survive redaction")
+
+	// And the log body should also be redacted.
+	for _, lr := range logRecordsByEventName(t, logsSink, "bazel.fetch") {
+		assert.NotContains(t, lr.Body().Str(), "s3cret",
+			"log body must redact userinfo password")
+	}
+}
+
+// TestTraceBuilder_Fetch_RedactsQueryStringByDefault — pre-signed S3/GCS
+// URLs put credentials in query params. The default-off
+// IncludeFetchQueryString config strips them.
+func TestTraceBuilder_Fetch_RedactsQueryStringByDefault(t *testing.T) {
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-q", "uuid-q", "build", 1),
+		makeFetchOBE(t, "inv-q",
+			"https://s3.example.com/bucket/key.tar.gz?X-Amz-Signature=abc123&X-Amz-Date=20260101",
+			2, true),
+		makeBuildFinishedOBE(t, "inv-q", 3, 0, "SUCCESS"),
+	)
+
+	spans := findFetchSpans(t, sink)
+	require.Len(t, spans, 1)
+	url, _ := spans[0].Attributes().Get("bazel.fetch.url")
+	assert.NotContains(t, url.Str(), "X-Amz-Signature")
+	assert.NotContains(t, url.Str(), "abc123")
+	assert.Contains(t, url.Str(), "/bucket/key.tar.gz")
+}
+
+// TestTraceBuilder_Fetch_QueryStringOptIn — operators investigating a
+// custom mirror can opt into preserving the query string.
+func TestTraceBuilder_Fetch_QueryStringOptIn(t *testing.T) {
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{
+		PII: PIIConfig{IncludeFetchQueryString: true},
+	})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-qopt", "uuid-qopt", "build", 1),
+		makeFetchOBE(t, "inv-qopt",
+			"https://mirror.example.com/lib.tar.gz?version=1.2.3", 2, true),
+		makeBuildFinishedOBE(t, "inv-qopt", 3, 0, "SUCCESS"),
+	)
+
+	spans := findFetchSpans(t, sink)
+	require.Len(t, spans, 1)
+	url, _ := spans[0].Attributes().Get("bazel.fetch.url")
+	assert.Contains(t, url.Str(), "version=1.2.3")
+}
+
+// TestTraceBuilder_Fetch_NonStandardURLPassThrough — Bazel's BEP also
+// carries non-RFC-3986 URLs (oci:// references with @sha256, file://
+// mirror paths). The receiver must pass them through unmodified rather
+// than dropping the span.
+func TestTraceBuilder_Fetch_NonStandardURLPassThrough(t *testing.T) {
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	const ociURL = "oci://repo.example.com/image@sha256:deadbeef"
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-oci", "uuid-oci", "build", 1),
+		makeFetchOBE(t, "inv-oci", ociURL, 2, true),
+		makeBuildFinishedOBE(t, "inv-oci", 3, 0, "SUCCESS"),
+	)
+
+	spans := findFetchSpans(t, sink)
+	require.Len(t, spans, 1)
+	url, _ := spans[0].Attributes().Get("bazel.fetch.url")
+	assert.Equal(t, ociURL, url.Str())
+}
+
+// TestTraceBuilder_Fetch_DownloaderAttribute — bazel.fetch.downloader
+// surfaces the FetchId.Downloader enum so retries via different
+// transports (HTTP vs gRPC, often during fallback) can be told apart.
+func TestTraceBuilder_Fetch_DownloaderAttribute(t *testing.T) {
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-dl", "uuid-dl", "build", 1),
+		makeFetchOBEWithDownloader(t, "inv-dl",
+			"https://example.com/lib.tar.gz", 2, true,
+			bep.BuildEventId_FetchId_HTTP),
+		makeBuildFinishedOBE(t, "inv-dl", 3, 0, "SUCCESS"),
+	)
+
+	spans := findFetchSpans(t, sink)
+	require.Len(t, spans, 1)
+	dl, ok := spans[0].Attributes().Get("bazel.fetch.downloader")
+	require.True(t, ok)
+	assert.Equal(t, "HTTP", dl.Str())
+}
+
+// TestTraceBuilder_Fetch_SameURLDistinctSpanIDs — repeated fetches of
+// the same URL within one invocation (transient retry, multi-arch
+// toolchain pull) must produce distinct SpanIDs so backends do not
+// collapse them.
+func TestTraceBuilder_Fetch_SameURLDistinctSpanIDs(t *testing.T) {
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-dup", "uuid-dup", "build", 1),
+		makeFetchOBE(t, "inv-dup", "https://example.com/lib.tar.gz", 2, false),
+		makeFetchOBE(t, "inv-dup", "https://example.com/lib.tar.gz", 3, true),
+		makeBuildFinishedOBE(t, "inv-dup", 4, 0, "SUCCESS"),
+	)
+
+	spans := findFetchSpans(t, sink)
+	require.Len(t, spans, 2, "two fetch events must produce two spans")
+	assert.NotEqual(t, spans[0].SpanID(), spans[1].SpanID(),
+		"repeated fetches of the same URL must have distinct SpanIDs")
+}
+
+// TestTraceBuilder_Fetch_InstantSpanTiming — the span is zero-width at
+// event-processing time, not a 5-minute bar from invocation createdAt.
+func TestTraceBuilder_Fetch_InstantSpanTiming(t *testing.T) {
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-instant", "uuid-instant", "build", 1),
+		makeFetchOBE(t, "inv-instant", "https://example.com/lib.tar.gz", 2, true),
+		makeBuildFinishedOBE(t, "inv-instant", 3, 0, "SUCCESS"),
+	)
+
+	spans := findFetchSpans(t, sink)
+	require.Len(t, spans, 1)
+	assert.Equal(t, spans[0].StartTimestamp(), spans[0].EndTimestamp(),
+		"fetch span must be zero-width (start == end)")
+}
+
+// TestTraceBuilder_Fetch_LatePostFlush — Fetch arriving between
+// BuildFinished and BuildMetrics goes through lateFetchSpan and emits
+// in a standalone Traces payload tied to the same TraceID.
+func TestTraceBuilder_Fetch_LatePostFlush(t *testing.T) {
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-late", "uuid-late", "build", 1),
+		// BuildFinished flushes the pending traces batch.
+		makeBuildFinishedOBE(t, "inv-late", 2, 0, "SUCCESS"),
+		// Late fetch must still produce a span.
+		makeFetchOBE(t, "inv-late", "https://example.com/late.tar.gz", 3, true),
+	)
+
+	spans := findFetchSpans(t, sink)
+	require.Len(t, spans, 1, "post-flush Fetch must still produce a span")
+	assert.Equal(t, traceIDFromUUID("uuid-late"), spans[0].TraceID(),
+		"late fetch span must share the invocation traceID")
+}
+
+// TestTraceBuilder_Fetch_FilterSuppressesLogToo — the log emission must
+// also respect the filter gate. Drop / build_only operators must not
+// see fetch URLs leak into the logs pipeline even though they suppressed
+// the spans.
+func TestTraceBuilder_Fetch_FilterSuppressesLogToo(t *testing.T) {
+	sink := new(consumertest.TracesSink)
+	logsSink := new(consumertest.LogsSink)
+	tb := NewTraceBuilder(sink, logsSink, nil, zap.NewNop(), TraceBuilderConfig{
+		Filter: FilterConfig{DefaultLevel: DetailLevelBuildOnly},
+	})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-flog", "uuid-flog", "build", 1),
+		makeFetchOBE(t, "inv-flog", "https://alice:s3cret@host/x", 2, true),
+		makeBuildFinishedOBE(t, "inv-flog", 3, 0, "SUCCESS"),
+	)
+
+	assert.Empty(t, findFetchSpans(t, sink), "filter must suppress the span")
+	assert.Empty(t, logRecordsByEventName(t, logsSink, "bazel.fetch"),
+		"filter must suppress bazel.fetch log records too")
+}

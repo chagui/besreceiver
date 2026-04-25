@@ -59,6 +59,23 @@ func (d DetailLevel) allowAction() bool {
 	return d == DetailLevelVerbose
 }
 
+// allowFetch returns true if the level permits emission of bazel.fetch
+// spans. Fetch spans are per-invocation detail with no owning target, so
+// drop / build_only suppress them; targets and verbose keep them. The
+// split from allowAction matters because an operator may want per-target
+// spans suppressed (DetailLevelTargets or below for the action gate) yet
+// still see fetch activity, which is frequently the dominant cost on
+// clean builds.
+func (d DetailLevel) allowFetch() bool {
+	switch d {
+	case DetailLevelTargets, DetailLevelVerbose:
+		return true
+	case DetailLevelDrop, DetailLevelBuildOnly:
+		return false
+	}
+	return false
+}
+
 // FilterConfig configures per-target detail level filtering. When the
 // surrounding receiver config omits this block entirely, DefaultLevel is
 // empty and Rules is nil; NewFilter treats that as verbose (current
