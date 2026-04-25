@@ -21,6 +21,8 @@ import (
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/timestamppb"
 
@@ -3124,18 +3126,30 @@ func runExecRequestStream(t *testing.T, pii PIIConfig) *consumertest.TracesSink 
 }
 
 // TestExecRequest_AllPIIOn verifies every bazel.run.* attribute is stamped
-// when the necessary PII gates are open.
+// when the necessary PII gates are open. Asserts the receiver sorts env
+// entries server-side (input map iteration order is non-deterministic).
 func TestExecRequest_AllPIIOn(t *testing.T) {
 	sink := runExecRequestStream(t, PIIConfig{
-		IncludeCommandArgs: true,
-		IncludeWorkingDir:  true,
+		IncludeCommandArgs:    true,
+		IncludeRunEnvironment: true,
+		IncludeWorkingDir:     true,
 	})
 	root := findRootSpan(t, sink)
 
-	// Always-on: count + should_exec.
+	// Always-on: counts + should_exec. argv_count parallels env counts so
+	// operators see the raw payload size even when the slice is capped or
+	// the gate is closed.
+	argvCount, ok := root.Attributes().Get("bazel.run.argv_count")
+	require.True(t, ok)
+	assert.Equal(t, int64(3), argvCount.Int())
+
 	count, ok := root.Attributes().Get("bazel.run.environment_variable_count")
 	require.True(t, ok)
 	assert.Equal(t, int64(2), count.Int())
+
+	clearCount, ok := root.Attributes().Get("bazel.run.environment_variable_to_clear_count")
+	require.True(t, ok)
+	assert.Equal(t, int64(0), clearCount.Int())
 
 	se, ok := root.Attributes().Get("bazel.run.should_exec")
 	require.True(t, ok)
@@ -3155,8 +3169,8 @@ func TestExecRequest_AllPIIOn(t *testing.T) {
 	assert.Equal(t, "--flag", argv.Slice().At(1).Str())
 	assert.Equal(t, "value", argv.Slice().At(2).Str())
 
-	// environment (gated by IncludeCommandArgs) as Slice[Map{name,value}],
-	// sorted by key thanks to the test helper.
+	// environment (gated by IncludeRunEnvironment) as Slice[Map{name,value}],
+	// sorted by name server-side.
 	env, ok := root.Attributes().Get("bazel.run.environment")
 	require.True(t, ok)
 	require.Equal(t, pcommon.ValueTypeSlice, env.Type())
@@ -3192,6 +3206,10 @@ func TestExecRequest_PIIOff_CountAndShouldExecStillEmitted(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, int64(2), count.Int())
 
+	clearCount, ok := root.Attributes().Get("bazel.run.environment_variable_to_clear_count")
+	require.True(t, ok)
+	assert.Equal(t, int64(0), clearCount.Int())
+
 	se, ok := root.Attributes().Get("bazel.run.should_exec")
 	require.True(t, ok)
 	assert.True(t, se.Bool())
@@ -3201,6 +3219,7 @@ func TestExecRequest_PIIOff_CountAndShouldExecStillEmitted(t *testing.T) {
 		"bazel.run.argv",
 		"bazel.run.working_directory",
 		"bazel.run.environment",
+		"bazel.run.environment_variable_to_clear",
 	} {
 		_, has := root.Attributes().Get(key)
 		assert.False(t, has, "expected %s to be redacted with PII off", key)
@@ -3220,13 +3239,14 @@ func TestExecRequest_WorkingDirGate_OnlyDir(t *testing.T) {
 	_, hasArgv := root.Attributes().Get("bazel.run.argv")
 	assert.False(t, hasArgv, "argv must stay redacted without IncludeCommandArgs")
 	_, hasEnv := root.Attributes().Get("bazel.run.environment")
-	assert.False(t, hasEnv, "environment must stay redacted without IncludeCommandArgs")
+	assert.False(t, hasEnv, "environment must stay redacted without IncludeRunEnvironment")
 }
 
-// TestExecRequest_CommandArgsGate_ArgvAndEnv asserts IncludeCommandArgs
-// surfaces both argv and environment (shared gate per issue #63) while
-// keeping working_directory redacted.
-func TestExecRequest_CommandArgsGate_ArgvAndEnv(t *testing.T) {
+// TestExecRequest_CommandArgsGate_ArgvOnly asserts IncludeCommandArgs alone
+// surfaces argv but NOT the environment — environment is gated separately
+// via IncludeRunEnvironment so operators can show the command without the
+// secrets that often live in env.
+func TestExecRequest_CommandArgsGate_ArgvOnly(t *testing.T) {
 	sink := runExecRequestStream(t, PIIConfig{IncludeCommandArgs: true})
 	root := findRootSpan(t, sink)
 
@@ -3235,22 +3255,38 @@ func TestExecRequest_CommandArgsGate_ArgvAndEnv(t *testing.T) {
 	require.Equal(t, pcommon.ValueTypeSlice, argv.Type())
 	assert.Equal(t, 3, argv.Slice().Len())
 
+	_, hasEnv := root.Attributes().Get("bazel.run.environment")
+	assert.False(t, hasEnv, "environment must stay redacted without IncludeRunEnvironment")
+	_, hasClear := root.Attributes().Get("bazel.run.environment_variable_to_clear")
+	assert.False(t, hasClear, "env_to_clear must stay redacted without IncludeRunEnvironment")
+	_, hasWD := root.Attributes().Get("bazel.run.working_directory")
+	assert.False(t, hasWD, "working_directory must stay redacted without IncludeWorkingDir")
+}
+
+// TestExecRequest_RunEnvironmentGate_EnvOnly asserts IncludeRunEnvironment
+// alone surfaces the environment block but keeps argv redacted (the
+// gates are independent so operators can show env without command args).
+func TestExecRequest_RunEnvironmentGate_EnvOnly(t *testing.T) {
+	sink := runExecRequestStream(t, PIIConfig{IncludeRunEnvironment: true})
+	root := findRootSpan(t, sink)
+
 	env, ok := root.Attributes().Get("bazel.run.environment")
 	require.True(t, ok)
 	require.Equal(t, pcommon.ValueTypeSlice, env.Type())
 	assert.Equal(t, 2, env.Slice().Len())
 
-	_, hasWD := root.Attributes().Get("bazel.run.working_directory")
-	assert.False(t, hasWD, "working_directory must stay redacted without IncludeWorkingDir")
+	_, hasArgv := root.Attributes().Get("bazel.run.argv")
+	assert.False(t, hasArgv, "argv must stay redacted without IncludeCommandArgs")
 }
 
 // TestExecRequest_NoWorkingDirectory asserts that an ExecRequestConstructed
 // event with an empty working_directory does not emit a blank attribute even
-// when IncludeWorkingDir is true.
+// when IncludeWorkingDir is true. should_exec=false here also covers the
+// --script_path mode where Bazel writes a script to disk instead of execing.
 func TestExecRequest_NoWorkingDirectory(t *testing.T) {
 	sink := new(consumertest.TracesSink)
 	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{
-		PII: PIIConfig{IncludeWorkingDir: true, IncludeCommandArgs: true},
+		PII: PIIConfig{IncludeWorkingDir: true, IncludeCommandArgs: true, IncludeRunEnvironment: true},
 	})
 	tb.Start()
 	defer tb.Stop()
@@ -3283,7 +3319,7 @@ func TestExecRequest_NoWorkingDirectory(t *testing.T) {
 func TestExecRequest_BazelBuild_NoAttrsEmitted(t *testing.T) {
 	sink := new(consumertest.TracesSink)
 	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{
-		PII: PIIConfig{IncludeWorkingDir: true, IncludeCommandArgs: true},
+		PII: PIIConfig{IncludeWorkingDir: true, IncludeCommandArgs: true, IncludeRunEnvironment: true},
 	})
 	tb.Start()
 	defer tb.Stop()
@@ -3299,7 +3335,9 @@ func TestExecRequest_BazelBuild_NoAttrsEmitted(t *testing.T) {
 		"bazel.run.argv",
 		"bazel.run.working_directory",
 		"bazel.run.environment_variable_count",
+		"bazel.run.environment_variable_to_clear_count",
 		"bazel.run.environment",
+		"bazel.run.environment_variable_to_clear",
 		"bazel.run.should_exec",
 	} {
 		_, has := root.Attributes().Get(key)
@@ -3712,4 +3750,592 @@ func TestTraceBuilder_Fetch_FilterSuppressesLogToo(t *testing.T) {
 	assert.Empty(t, findFetchSpans(t, sink), "filter must suppress the span")
 	assert.Empty(t, logRecordsByEventName(t, logsSink, "bazel.fetch"),
 		"filter must suppress bazel.fetch log records too")
+}
+
+// findRunSpans walks every emitted Traces batch and returns the bazel.run
+// spans across all of them. Tests should not unroll the four-level pdata
+// iteration manually.
+func findRunSpans(t *testing.T, sink *consumertest.TracesSink) []ptrace.Span {
+	t.Helper()
+	var out []ptrace.Span
+	for _, traces := range sink.AllTraces() {
+		for i := range traces.ResourceSpans().Len() {
+			rs := traces.ResourceSpans().At(i)
+			for j := range rs.ScopeSpans().Len() {
+				ss := rs.ScopeSpans().At(j)
+				for k := range ss.Spans().Len() {
+					if span := ss.Spans().At(k); span.Name() == "bazel.run" {
+						out = append(out, span)
+					}
+				}
+			}
+		}
+	}
+	return out
+}
+
+// TestExecRequest_LatePostFlush — Bazel's BEP doc places
+// ExecRequestConstructed "after a successful build and before trying to
+// execute", which in production means after BuildFinished on the wire. The
+// receiver must still emit bazel.run.* attrs in that case via a standalone
+// `bazel.run` span parented to the (already-flushed) root.
+func TestExecRequest_LatePostFlush(t *testing.T) {
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{
+		PII: PIIConfig{IncludeCommandArgs: true, IncludeRunEnvironment: true, IncludeWorkingDir: true},
+	})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-late", "uuid-late", "run", 1),
+		// BuildFinished arrives BEFORE ExecRequestConstructed — production order.
+		makeBuildFinishedOBE(t, "inv-late", 2, 0, "SUCCESS"),
+		makeExecRequestConstructedOBE(t, "inv-late", 3,
+			[]string{"/bin/tool", "--flag"},
+			"/wd",
+			map[string]string{"K": "v"},
+			true,
+		),
+	)
+
+	runSpans := findRunSpans(t, sink)
+	require.Len(t, runSpans, 1, "post-flush ExecRequestConstructed must produce exactly one bazel.run span")
+	runSpan := runSpans[0]
+
+	// TraceID matches the invocation; parent is the root; SpanID is the
+	// expected deterministic identity (catches duplicate-emission bugs).
+	assert.Equal(t, traceIDFromUUID("uuid-late"), runSpan.TraceID())
+	assert.Equal(t, spanIDFromIdentity("uuid-late", "root"), runSpan.ParentSpanID())
+	assert.Equal(t, spanIDFromIdentity("uuid-late", "run"), runSpan.SpanID())
+
+	// Zero-width timestamps stamped at handler time — non-zero so OTLP
+	// backends treat the span as a real instant rather than 1970-epoch.
+	assert.NotEqual(t, pcommon.Timestamp(0), runSpan.StartTimestamp(),
+		"late bazel.run span must have a non-zero start timestamp")
+	assert.Equal(t, runSpan.StartTimestamp(), runSpan.EndTimestamp(),
+		"late bazel.run span must be zero-width (start == end)")
+
+	// All bazel.run.* attrs land on the late span, gated identically to the
+	// pre-flush path.
+	argv, ok := runSpan.Attributes().Get("bazel.run.argv")
+	require.True(t, ok)
+	assert.Equal(t, 2, argv.Slice().Len())
+	wd, ok := runSpan.Attributes().Get("bazel.run.working_directory")
+	require.True(t, ok)
+	assert.Equal(t, "/wd", wd.Str())
+	env, ok := runSpan.Attributes().Get("bazel.run.environment")
+	require.True(t, ok)
+	assert.Equal(t, 1, env.Slice().Len())
+	se, ok := runSpan.Attributes().Get("bazel.run.should_exec")
+	require.True(t, ok)
+	assert.True(t, se.Bool())
+}
+
+// TestExecRequest_LateConsumerErrorDoesNotCommitGuard — when the late
+// `bazel.run` span fails to forward (retryable consumer error), the
+// receiver closes the BES stream so Bazel reconnects and replays the
+// event. The `invocations` map persists across reconnects (per
+// TraceBuilder.run lifetime, not per stream), so committing
+// runEmitted=true before the consume succeeds would silently drop the
+// replayed event. This test pins the contract: the SECOND attempt
+// (after a transient consumer error) must still emit the span.
+func TestExecRequest_LateConsumerErrorDoesNotCommitGuard(t *testing.T) {
+	flaky := &flakyTracesConsumer{sink: new(consumertest.TracesSink)}
+	tb := NewTraceBuilder(flaky, nil, nil, zap.NewNop(), TraceBuilderConfig{
+		PII: PIIConfig{IncludeCommandArgs: true},
+	})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	// Set up the invocation up to the late-path branch.
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-retry", "uuid-retry", "run", 1),
+		makeBuildFinishedOBE(t, "inv-retry", 2, 0, "SUCCESS"),
+	)
+
+	// First ExecRequestConstructed: flaky consumer fails the consume.
+	// The handler returns the error and the BES stream would be closed
+	// to prompt Bazel reconnect. runEmitted must NOT be committed.
+	flaky.failNext(errors.New("transient pipeline error"))
+	firstAttempt := makeExecRequestConstructedOBE(t, "inv-retry", 3,
+		[]string{"/bin/tool"}, "", nil, true,
+	)
+	require.Error(t, tb.ProcessOrderedBuildEvent(ctx, firstAttempt),
+		"flaky consumer must surface its error to the BES handler")
+
+	// Replay the event (Bazel's reconnect behaviour). Second attempt
+	// should succeed and emit the span — possible only if runEmitted
+	// was not committed on the failed attempt.
+	processEvents(ctx, t, tb,
+		makeExecRequestConstructedOBE(t, "inv-retry", 3,
+			[]string{"/bin/tool"}, "", nil, true,
+		),
+	)
+
+	require.Len(t, findRunSpans(t, flaky.sink), 1,
+		"replayed ExecRequestConstructed must produce a bazel.run span — runEmitted may not be committed before consume succeeds")
+}
+
+// TestExecRequest_LateDuplicateDropped — Bazel's BEP contract is one
+// ExecRequestConstructed per invocation, but BES gRPC reconnect/replay
+// can violate it. A duplicate post-flush event must be dropped to avoid
+// emitting a second bazel.run span with the same SpanID (which backends
+// collapse or reject).
+func TestExecRequest_LateDuplicateDropped(t *testing.T) {
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{
+		PII: PIIConfig{IncludeCommandArgs: true},
+	})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-dup", "uuid-dup", "run", 1),
+		makeBuildFinishedOBE(t, "inv-dup", 2, 0, "SUCCESS"),
+		makeExecRequestConstructedOBE(t, "inv-dup", 3,
+			[]string{"/bin/tool"}, "", nil, true,
+		),
+		// Duplicate ExecRequestConstructed — must be dropped.
+		makeExecRequestConstructedOBE(t, "inv-dup", 4,
+			[]string{"/bin/tool", "extra"}, "", nil, true,
+		),
+	)
+
+	runSpans := findRunSpans(t, sink)
+	require.Len(t, runSpans, 1,
+		"duplicate post-flush ExecRequestConstructed must not produce a second bazel.run span")
+}
+
+// TestExecRequest_WireOrderParity — pre-flush and post-flush wire orders
+// must yield byte-identical bazel.run.* attribute sets across every
+// filter level. Per the design (lateRunSpan filter-exempt because it
+// carries displaced root-span data), output cannot depend on whether
+// ExecRequestConstructed beat or trailed BuildFinished.
+func TestExecRequest_WireOrderParity(t *testing.T) {
+	pii := PIIConfig{IncludeCommandArgs: true, IncludeRunEnvironment: true, IncludeWorkingDir: true}
+	argv := []string{"/bin/tool", "--flag", "value"}
+	envMap := map[string]string{"FOO": "bar", "PATH": "/usr/bin"}
+
+	for _, level := range []DetailLevel{DetailLevelDrop, DetailLevelBuildOnly, DetailLevelTargets, DetailLevelVerbose} {
+		t.Run(string(level), func(t *testing.T) {
+			runOne := func(t *testing.T, postFlush bool) map[string]string {
+				t.Helper()
+				sink := new(consumertest.TracesSink)
+				tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{
+					PII:    pii,
+					Filter: FilterConfig{DefaultLevel: level},
+				})
+				tb.Start()
+				defer tb.Stop()
+				ctx := context.Background()
+
+				if postFlush {
+					processEvents(ctx, t, tb,
+						makeBuildStartedOBE(t, "inv", "uuid-parity", "run", 1),
+						makeBuildFinishedOBE(t, "inv", 2, 0, "SUCCESS"),
+						makeExecRequestConstructedOBE(t, "inv", 3, argv, "/wd", envMap, true),
+					)
+				} else {
+					processEvents(ctx, t, tb,
+						makeBuildStartedOBE(t, "inv", "uuid-parity", "run", 1),
+						makeExecRequestConstructedOBE(t, "inv", 2, argv, "/wd", envMap, true),
+						makeBuildFinishedOBE(t, "inv", 3, 0, "SUCCESS"),
+					)
+				}
+
+				// Collect bazel.run.* attrs from whichever span carries them
+				// (root pre-flush, late span post-flush).
+				out := make(map[string]string)
+				collect := func(span ptrace.Span) {
+					span.Attributes().Range(func(k string, v pcommon.Value) bool {
+						if strings.HasPrefix(k, "bazel.run.") {
+							out[k] = v.AsString()
+						}
+						return true
+					})
+				}
+				collect(findRootSpan(t, sink))
+				for _, rs := range findRunSpans(t, sink) {
+					collect(rs)
+				}
+				return out
+			}
+
+			pre := runOne(t, false)
+			post := runOne(t, true)
+			assert.Equal(t, pre, post,
+				"bazel.run.* attribute set must be wire-order-independent at level %s", level)
+		})
+	}
+}
+
+// TestExecRequest_TruncationRecordsEmitted — argv / env / env-to-clear
+// truncation must surface as truncationRecord-driven Warn logs, matching
+// applyPatternAttrs / appendGarbageMetrics. Validates the late-path
+// emission via the observable logger.
+func TestExecRequest_TruncationRecordsEmitted(t *testing.T) {
+	core, observed := observer.New(zapcore.WarnLevel)
+	logger := zap.New(core)
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, logger, TraceBuilderConfig{
+		PII: PIIConfig{IncludeCommandArgs: true, IncludeRunEnvironment: true},
+	})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	// Drive each list past its cap so the late-path Warn loop fires for
+	// all three. Each derives from the configured cap so test stays in
+	// sync if caps move.
+	overArgv := maxRunArgvEntries + 50
+	overEnv := maxRunEnvEntries + 30
+	overClear := maxRunEnvClearEntries + 20
+	argv := make([]string, overArgv)
+	for i := range argv {
+		argv[i] = fmt.Sprintf("--arg%03d", i)
+	}
+	envMap := make(map[string]string, overEnv)
+	for i := range overEnv {
+		envMap[fmt.Sprintf("VAR_%03d", i)] = "v"
+	}
+	clearList := make([]string, overClear)
+	for i := range clearList {
+		clearList[i] = fmt.Sprintf("UNSET_%03d", i)
+	}
+
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-trunc", "uuid-trunc", "run", 1),
+		makeBuildFinishedOBE(t, "inv-trunc", 2, 0, "SUCCESS"),
+		makeExecRequestConstructedOBEFull(t, "inv-trunc", 3, argv, "", envMap, clearList, true),
+	)
+
+	// One Warn log per truncated attribute.
+	warns := observed.FilterMessage("Truncated bazel.run.* attribute").All()
+	gotAttrs := make(map[string]bool)
+	for _, e := range warns {
+		for _, f := range e.Context {
+			if f.Key == "attribute" {
+				gotAttrs[f.String] = true
+			}
+		}
+	}
+	assert.True(t, gotAttrs["bazel.run.argv"], "expected truncation Warn for bazel.run.argv")
+	assert.True(t, gotAttrs["bazel.run.environment"], "expected truncation Warn for bazel.run.environment")
+	assert.True(t, gotAttrs["bazel.run.environment_variable_to_clear"], "expected truncation Warn for bazel.run.environment_variable_to_clear")
+
+	// Always-on counts reflect the original payload size, not the cap.
+	runSpans := findRunSpans(t, sink)
+	require.Len(t, runSpans, 1)
+	root := runSpans[0]
+	argvCount, _ := root.Attributes().Get("bazel.run.argv_count")
+	assert.Equal(t, int64(overArgv), argvCount.Int())
+	envCount, _ := root.Attributes().Get("bazel.run.environment_variable_count")
+	assert.Equal(t, int64(overEnv), envCount.Int())
+	clearCount, _ := root.Attributes().Get("bazel.run.environment_variable_to_clear_count")
+	assert.Equal(t, int64(overClear), clearCount.Int())
+}
+
+// TestExecRequest_TruncationAccountingThreeNumbersAlign — when invalid
+// UTF-8 entries AND over-cap entries are both present, the three numbers
+// reviewers track must be mutually consistent:
+//
+//   - `bazel.run.*_count` attribute       = raw proto length
+//   - truncationRecord.original           = raw proto length (matches count)
+//   - truncationRecord.kept = slice.Len() = actually-emitted entries
+//
+// The gap (count - kept) is the operator's signal for "data dropped";
+// whether by cap or UTF-8 skip is a follow-up signal but not part of the
+// truncation contract itself.
+func TestExecRequest_TruncationAccountingThreeNumbersAlign(t *testing.T) {
+	core, observed := observer.New(zapcore.WarnLevel)
+	logger := zap.New(core)
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, logger, TraceBuilderConfig{
+		PII: PIIConfig{IncludeCommandArgs: true, IncludeRunEnvironment: true},
+	})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	// Build an argv with a few invalid-UTF-8 entries scattered through and
+	// the total over the cap. Same for env and env-to-clear.
+	const invalidEvery = 7
+	invalid := []byte{0xff, 0xfe}
+
+	overArgv := maxRunArgvEntries + 30
+	argvBytes := make([][]byte, overArgv)
+	for i := range argvBytes {
+		if i%invalidEvery == 0 {
+			argvBytes[i] = invalid
+		} else {
+			argvBytes[i] = fmt.Appendf(nil, "--arg%03d", i)
+		}
+	}
+
+	overEnv := maxRunEnvEntries + 20
+	envVars := make([]*bep.EnvironmentVariable, overEnv)
+	for i := range envVars {
+		if i%invalidEvery == 0 {
+			envVars[i] = &bep.EnvironmentVariable{Name: invalid, Value: []byte("v")}
+		} else {
+			envVars[i] = &bep.EnvironmentVariable{
+				Name:  fmt.Appendf(nil, "VAR_%03d", i),
+				Value: []byte("v"),
+			}
+		}
+	}
+
+	overClear := maxRunEnvClearEntries + 15
+	clearBytes := make([][]byte, overClear)
+	for i := range clearBytes {
+		if i%invalidEvery == 0 {
+			clearBytes[i] = invalid
+		} else {
+			clearBytes[i] = fmt.Appendf(nil, "UNSET_%03d", i)
+		}
+	}
+
+	// Drive the late path so handleExecRequestConstructed's Warn loop fires.
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-acct", "uuid-acct", "run", 1),
+		makeBuildFinishedOBE(t, "inv-acct", 2, 0, "SUCCESS"),
+		makeOrderedBuildEvent(t, "inv-acct", 3, &bep.BuildEvent{
+			Id: &bep.BuildEventId{Id: &bep.BuildEventId_ExecRequest{ExecRequest: &bep.BuildEventId_ExecRequestId{}}},
+			Payload: &bep.BuildEvent_ExecRequest{
+				ExecRequest: &bep.ExecRequestConstructed{
+					Argv:                       argvBytes,
+					EnvironmentVariable:        envVars,
+					EnvironmentVariableToClear: clearBytes,
+					ShouldExec:                 true,
+				},
+			},
+		}),
+	)
+
+	runSpans := findRunSpans(t, sink)
+	require.Len(t, runSpans, 1)
+	root := runSpans[0]
+
+	// Pull truncationRecord values out of the Warn log fields keyed by attribute.
+	type rec struct{ original, kept int64 }
+	got := map[string]rec{}
+	for _, e := range observed.FilterMessage("Truncated bazel.run.* attribute").All() {
+		var r rec
+		var attr string
+		for _, f := range e.Context {
+			switch f.Key {
+			case "attribute":
+				attr = f.String
+			case "original_count":
+				r.original = f.Integer
+			case "kept":
+				r.kept = f.Integer
+			}
+		}
+		got[attr] = r
+	}
+
+	// argv: count == original == raw proto length; kept == emitted slice length.
+	argvCount, _ := root.Attributes().Get("bazel.run.argv_count")
+	argvSlice, _ := root.Attributes().Get("bazel.run.argv")
+	assert.Equal(t, int64(overArgv), argvCount.Int(), "argv_count must equal raw proto length")
+	assert.Equal(t, int64(overArgv), got["bazel.run.argv"].original,
+		"argv truncationRecord.original must match argv_count")
+	assert.Equal(t, int64(argvSlice.Slice().Len()), got["bazel.run.argv"].kept,
+		"argv truncationRecord.kept must match emitted slice length")
+
+	// env: same.
+	envCount, _ := root.Attributes().Get("bazel.run.environment_variable_count")
+	envSlice, _ := root.Attributes().Get("bazel.run.environment")
+	assert.Equal(t, int64(overEnv), envCount.Int())
+	assert.Equal(t, int64(overEnv), got["bazel.run.environment"].original)
+	assert.Equal(t, int64(envSlice.Slice().Len()), got["bazel.run.environment"].kept)
+
+	// env-to-clear: same.
+	clearCount, _ := root.Attributes().Get("bazel.run.environment_variable_to_clear_count")
+	clearSlice, _ := root.Attributes().Get("bazel.run.environment_variable_to_clear")
+	assert.Equal(t, int64(overClear), clearCount.Int())
+	assert.Equal(t, int64(overClear), got["bazel.run.environment_variable_to_clear"].original)
+	assert.Equal(t, int64(clearSlice.Slice().Len()), got["bazel.run.environment_variable_to_clear"].kept)
+}
+
+// TestExecRequest_PreBuildStartedDropped — ExecRequestConstructed arriving
+// before the BuildStarted event for an invocation has no state to attach
+// to and must be silently dropped, matching every other handler.
+func TestExecRequest_PreBuildStartedDropped(t *testing.T) {
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{
+		PII: PIIConfig{IncludeCommandArgs: true, IncludeRunEnvironment: true},
+	})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	processEvents(ctx, t, tb,
+		makeExecRequestConstructedOBE(t, "inv-orphan", 1,
+			[]string{"/bin/tool"}, "/wd",
+			map[string]string{"K": "v"}, true,
+		),
+	)
+
+	assert.Empty(t, sink.AllTraces(), "no traces should emit before BuildStarted")
+}
+
+// TestExecRequest_EnvironmentVariableToClear — proto field 4 is emitted
+// alongside environment when IncludeRunEnvironment is on, plus the
+// always-on count for parity with environment_variable_count.
+func TestExecRequest_EnvironmentVariableToClear(t *testing.T) {
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{
+		PII: PIIConfig{IncludeRunEnvironment: true},
+	})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-clr", "uuid-clr", "run", 1),
+		makeExecRequestConstructedOBEFull(t, "inv-clr", 2,
+			[]string{}, "",
+			map[string]string{"KEEP": "1"},
+			[]string{"PROXY", "AWS_SECRET", "PATH"},
+			true,
+		),
+		makeBuildFinishedOBE(t, "inv-clr", 3, 0, "SUCCESS"),
+	)
+
+	root := findRootSpan(t, sink)
+	clearCount, ok := root.Attributes().Get("bazel.run.environment_variable_to_clear_count")
+	require.True(t, ok)
+	assert.Equal(t, int64(3), clearCount.Int())
+
+	clearList, ok := root.Attributes().Get("bazel.run.environment_variable_to_clear")
+	require.True(t, ok)
+	require.Equal(t, pcommon.ValueTypeSlice, clearList.Type())
+	require.Equal(t, 3, clearList.Slice().Len())
+	// Sorted.
+	assert.Equal(t, "AWS_SECRET", clearList.Slice().At(0).Str())
+	assert.Equal(t, "PATH", clearList.Slice().At(1).Str())
+	assert.Equal(t, "PROXY", clearList.Slice().At(2).Str())
+}
+
+// TestExecRequest_NonUTF8Skipped — non-UTF-8 bytes in argv/env must be
+// dropped before pdata sees them. OTLP/JSON exporters reject invalid
+// UTF-8 and that failure cascades the entire span batch, so silent skip
+// is the correct trade-off.
+func TestExecRequest_NonUTF8Skipped(t *testing.T) {
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{
+		PII: PIIConfig{IncludeCommandArgs: true, IncludeRunEnvironment: true, IncludeWorkingDir: true},
+	})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	// Construct payload directly so we control the bytes — \xff is the start
+	// of an illegal UTF-8 sequence.
+	invalid := []byte{0xff, 0xfe}
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-utf8", "uuid-utf8", "run", 1),
+		makeOrderedBuildEvent(t, "inv-utf8", 2, &bep.BuildEvent{
+			Id: &bep.BuildEventId{Id: &bep.BuildEventId_ExecRequest{ExecRequest: &bep.BuildEventId_ExecRequestId{}}},
+			Payload: &bep.BuildEvent_ExecRequest{
+				ExecRequest: &bep.ExecRequestConstructed{
+					Argv:             [][]byte{[]byte("/bin/ok"), invalid, []byte("--flag")},
+					WorkingDirectory: invalid,
+					EnvironmentVariable: []*bep.EnvironmentVariable{
+						{Name: []byte("OK"), Value: []byte("value")},
+						{Name: invalid, Value: []byte("v")},
+						{Name: []byte("BAD_VAL"), Value: invalid},
+					},
+					ShouldExec: true,
+				},
+			},
+		}),
+		makeBuildFinishedOBE(t, "inv-utf8", 3, 0, "SUCCESS"),
+	)
+
+	root := findRootSpan(t, sink)
+	// argv: invalid entry skipped, two valid kept.
+	argv, ok := root.Attributes().Get("bazel.run.argv")
+	require.True(t, ok)
+	require.Equal(t, 2, argv.Slice().Len())
+	assert.Equal(t, "/bin/ok", argv.Slice().At(0).Str())
+	assert.Equal(t, "--flag", argv.Slice().At(1).Str())
+
+	// working_directory: invalid → attribute absent.
+	_, hasWD := root.Attributes().Get("bazel.run.working_directory")
+	assert.False(t, hasWD, "invalid UTF-8 working_directory must be skipped")
+
+	// env: only the entry with both valid name AND value survives.
+	env, ok := root.Attributes().Get("bazel.run.environment")
+	require.True(t, ok)
+	require.Equal(t, 1, env.Slice().Len())
+	name, _ := env.Slice().At(0).Map().Get("name")
+	assert.Equal(t, "OK", name.Str())
+}
+
+// TestExecRequest_ArgvCappedAt200 — large argv is truncated to the cap.
+func TestExecRequest_ArgvCappedAt200(t *testing.T) {
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{
+		PII: PIIConfig{IncludeCommandArgs: true},
+	})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	const overCap = 250
+	argv := make([]string, overCap)
+	for i := range overCap {
+		argv[i] = fmt.Sprintf("--arg%03d", i)
+	}
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-cap", "uuid-cap", "run", 1),
+		makeExecRequestConstructedOBE(t, "inv-cap", 2, argv, "", nil, true),
+		makeBuildFinishedOBE(t, "inv-cap", 3, 0, "SUCCESS"),
+	)
+
+	root := findRootSpan(t, sink)
+	got, ok := root.Attributes().Get("bazel.run.argv")
+	require.True(t, ok)
+	assert.Equal(t, maxRunArgvEntries, got.Slice().Len(),
+		"argv must be capped at maxRunArgvEntries (%d) when input exceeds it", maxRunArgvEntries)
+}
+
+// TestExecRequest_EnvCapped — large env is truncated to the cap.
+func TestExecRequest_EnvCapped(t *testing.T) {
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{
+		PII: PIIConfig{IncludeRunEnvironment: true},
+	})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	overCap := maxRunEnvEntries + 50
+	env := make(map[string]string, overCap)
+	for i := range overCap {
+		env[fmt.Sprintf("VAR_%03d", i)] = "v"
+	}
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-envcap", "uuid-envcap", "run", 1),
+		makeExecRequestConstructedOBE(t, "inv-envcap", 2, nil, "", env, true),
+		makeBuildFinishedOBE(t, "inv-envcap", 3, 0, "SUCCESS"),
+	)
+
+	root := findRootSpan(t, sink)
+	got, ok := root.Attributes().Get("bazel.run.environment")
+	require.True(t, ok)
+	assert.Equal(t, maxRunEnvEntries, got.Slice().Len(),
+		"environment must be capped at maxRunEnvEntries (%d) when input exceeds it", maxRunEnvEntries)
+
+	// The ALWAYS-ON count reflects the full payload, not the capped slice —
+	// operators see the truth even when the slice is clipped.
+	count, _ := root.Attributes().Get("bazel.run.environment_variable_count")
+	assert.Equal(t, int64(overCap), count.Int())
 }

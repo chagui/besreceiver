@@ -49,20 +49,44 @@ without `BuildFinished`, from the reaper path.
 | `bazel.options.startup_count`| int    | `len(OptionsParsed.explicit_startup_options)`                    |
 | `bazel.options.command_count`| int    | `len(OptionsParsed.explicit_cmd_line)`                           |
 | `bazel.command_line`         | string | Reconstructed `StructuredCommandLine` — **PII**, requires `include_command_line` |
-| `bazel.run.argv`                       | Slice[string]      | `ExecRequestConstructed.argv` (only on `bazel run`) — **PII**, requires `include_command_args` |
-| `bazel.run.working_directory`          | string             | `ExecRequestConstructed.working_directory` (only on `bazel run`) — **PII**, requires `include_working_dir` |
-| `bazel.run.environment_variable_count` | int                | `len(ExecRequestConstructed.environment_variable)` (only on `bazel run`) |
-| `bazel.run.environment`                | Slice[Map]         | `ExecRequestConstructed.environment_variable` (only on `bazel run`) — `{name, value}` entries; **PII**, requires `include_command_args` |
-| `bazel.run.should_exec`                | bool               | `ExecRequestConstructed.should_exec` (only on `bazel run`) |
-| `bazel.patterns`                       | Slice[Map]         | `PatternExpanded` — one entry per requested pattern: `{pattern, target_count}`. Aggregated across events; capped by `high_cardinality_caps.patterns` (default 50). |
+| `bazel.run.argv`                                | Slice[string]      | `ExecRequestConstructed.argv` (only on `bazel run`) — **PII**, requires `include_command_args` |
+| `bazel.run.argv_count`                          | int                | `len(ExecRequestConstructed.argv)` (only on `bazel run`) — pre-cap count |
+| `bazel.run.working_directory`                   | string             | `ExecRequestConstructed.working_directory` (only on `bazel run`) — **PII**, requires `include_working_dir` |
+| `bazel.run.environment_variable_count`          | int                | `len(ExecRequestConstructed.environment_variable)` (only on `bazel run`) — pre-cap count |
+| `bazel.run.environment_variable_to_clear_count` | int                | `len(ExecRequestConstructed.environment_variable_to_clear)` (only on `bazel run`) |
+| `bazel.run.environment`                         | Slice[Map]         | `ExecRequestConstructed.environment_variable` (only on `bazel run`) — `{name, value}` entries sorted by name, capped at 50; **PII**, requires `include_run_environment` |
+| `bazel.run.environment_variable_to_clear`       | Slice[string]      | `ExecRequestConstructed.environment_variable_to_clear` — env names Bazel will unset before exec; sorted, capped at 50; **PII**, requires `include_run_environment` |
+| `bazel.run.should_exec`                         | bool               | `ExecRequestConstructed.should_exec` (only on `bazel run`) — `false` means Bazel wrote a script via `--script_path` instead of execing |
+| `bazel.patterns`                                | Slice[Map]         | `PatternExpanded` — one entry per requested pattern: `{pattern, target_count}`. Aggregated across events; capped by `high_cardinality_caps.patterns` (default 50). |
 
 The `bazel.run.*` group is populated only for `bazel run` invocations, where
 Bazel emits `ExecRequestConstructed` after the build succeeds and before the
-target is exec'd. `bazel build` / `bazel test` invocations carry none of
-these attributes. `bazel.run.environment_variable_count` and
-`bazel.run.should_exec` are always emitted when the event arrives (counts
-and bools carry no PII); argv, environment, and working_directory are
-PII-gated per the table above.
+target is exec'd. The proto explicitly says this event is "announced only
+after a successful build and before trying to execute" — i.e. it can arrive
+*after* `BuildFinished` on the wire. The receiver handles both orderings:
+when the event arrives before `BuildFinished` the attrs land on the root
+`bazel.build` span; when it arrives after, the receiver emits a standalone
+`bazel.run` child span (parented to the root via traceID/spanID) carrying
+the same attrs.
+
+`bazel build` / `bazel test` invocations carry none of these attributes.
+`bazel.run.argv_count`, `bazel.run.environment_variable_count`,
+`bazel.run.environment_variable_to_clear_count`, and `bazel.run.should_exec`
+are always emitted when the event arrives (counts and bools carry no PII);
+argv requires `include_command_args`; environment + the to-clear list are
+gated separately by the new `include_run_environment` flag because run
+environments routinely carry credentials and host secrets that command-line
+arguments do not.
+
+**Bounds.** `bazel.run.argv` is capped at 200 entries, `bazel.run.environment`
+and `bazel.run.environment_variable_to_clear` at 50 each. Per-value bytes
+(argv strings, env names, env values, working_directory, env-to-clear names)
+are clipped to 256 bytes at a UTF-8 rune boundary via the shared
+`truncateAttrValue` helper. The `..._count` attributes report the pre-cap
+size so operators see when truncation occurred — separately, each truncation
+emits a Warn log with `invocation_id`, `attribute`, `original_count`, and
+`kept` (matches the `applyPatternAttrs` / `bazel.metrics.garbage` pattern).
+Non-UTF-8 entries are silently skipped to avoid OTLP/JSON exporter rejection.
 
 `bazel.patterns` captures what the user asked for: e.g. a `bazel test //...`
 invocation that fans out to 1,400 tests emits a single entry
@@ -260,7 +284,8 @@ receivers:
       include_username: false              # bazel.user + user-like workspace/metadata keys
       include_workspace_dir: false         # bazel.workspace_directory + matching workspace/metadata keys
       include_working_dir: false           # bazel.working_directory + bazel.run.working_directory + matching workspace/metadata keys
-      include_command_args: false          # bazel.action.command_line + bazel.run.argv + bazel.run.environment
+      include_command_args: false          # bazel.action.command_line + bazel.run.argv
+      include_run_environment: false       # bazel.run.environment + bazel.run.environment_variable_to_clear
       include_fetch_query_string: false    # preserve query string on bazel.fetch.url (default off — strips pre-signed S3/GCS creds)
       include_action_output_paths: false   # bazel.action.primary_output
       include_workspace_status: false      # bazel.workspace.* pathway (per-key filtered)

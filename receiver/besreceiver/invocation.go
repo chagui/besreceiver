@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"go.opentelemetry.io/collector/pdata/pcommon"
 	"go.opentelemetry.io/collector/pdata/ptrace"
@@ -141,6 +142,15 @@ type invocationState struct {
 	// repository_cache evictions). Combined with FetchId.Downloader the
 	// resulting SpanID is unique per fetch event in the stream.
 	fetchSeq int64
+
+	// runEmitted is set after the post-flush bazel.run span has been emitted
+	// for this invocation. Bazel's BEP contract is one ExecRequestConstructed
+	// per invocation, but BES gRPC reconnect/replay scenarios remove the
+	// invariant — without this guard a duplicate event would emit a second
+	// bazel.run span with the same SpanID, which downstream backends collapse
+	// or reject. Pre-flush re-stamping is naturally idempotent (same root
+	// span, same attribute keys), so this only gates the lateRunSpan path.
+	runEmitted bool
 }
 
 // BuildSummary holds per-invocation aggregate counters emitted as
@@ -535,7 +545,9 @@ func (s *invocationState) writeRootSpan(finished *bep.BuildFinished) []truncatio
 		span.Attributes().PutStr("bazel.command_line", s.commandLine)
 	}
 
-	s.applyExecRequestAttrs(span)
+	// applyExecRequestAttrs returns truncation records — collected below.
+	var truncs []truncationRecord
+	truncs = s.applyExecRequestAttrs(span, truncs)
 
 	s.applyContextAttributes(span)
 
@@ -559,7 +571,6 @@ func (s *invocationState) writeRootSpan(finished *bep.BuildFinished) []truncatio
 		span.Status().SetMessage("aborted: " + s.abortReason + ": " + s.abortDescription)
 	}
 
-	var truncs []truncationRecord
 	truncs = s.applyPatternAttrs(span, truncs)
 	return truncs
 }
@@ -591,65 +602,228 @@ func (s *invocationState) applyStartedAttributes(span ptrace.Span) {
 	}
 }
 
+// Caps applied to bazel.run.* slice attributes. Bazel does not document
+// upper bounds, but in practice `bazel run` argv lists rarely exceed 150
+// entries (binary path + flags + a handful of args), OS-typical process
+// environments are 30-100 entries with CI runners landing at the high
+// end, and clear-lists are short (PROXY/PATH/HOME-style). 200 covers
+// argv comfortably; 150 covers env without clipping CI environments
+// at the median; 50 covers clear-lists. truncationRecord-driven Warn
+// logs surface whenever the cap fires so operators with concrete data
+// can argue for a higher value.
+const (
+	maxRunArgvEntries     = 200
+	maxRunEnvEntries      = 150
+	maxRunEnvClearEntries = 50
+)
+
 // applyExecRequestAttrs stamps bazel.run.* attributes from a buffered
 // ExecRequestConstructed. No-op when the event was never buffered (the
 // common case for `bazel build` / `bazel test` invocations, which never
 // emit ExecRequestConstructed).
 //
 // Gating matrix:
-//   - bazel.run.argv:                     PII.IncludeCommandArgs
-//   - bazel.run.environment:              PII.IncludeCommandArgs (env often
-//     carries argv-adjacent secrets, so it reuses the same gate)
-//   - bazel.run.working_directory:        PII.IncludeWorkingDir
-//   - bazel.run.environment_variable_count: always emitted (count only, safe)
-//   - bazel.run.should_exec:              always emitted (bool, safe)
 //
-// The BEP proto types argv / working_directory / env name+value as bytes,
-// not string — they are filesystem paths and OS environment values that
-// may contain arbitrary bytes. We cast to string for attribute emission
-// (matching the convention used for other byte-typed BEP fields).
-func (s *invocationState) applyExecRequestAttrs(span ptrace.Span) {
+//   - bazel.run.argv:                                  PII.IncludeCommandArgs
+//   - bazel.run.environment:                           PII.IncludeRunEnvironment
+//   - bazel.run.environment_variable_to_clear:         PII.IncludeRunEnvironment
+//   - bazel.run.working_directory:                     PII.IncludeWorkingDir
+//   - bazel.run.environment_variable_count:            always (count, safe)
+//   - bazel.run.environment_variable_to_clear_count:   always (count, safe)
+//   - bazel.run.should_exec:                           always (bool, safe;
+//     `false` means Bazel wrote a script via --script_path instead of execing)
+//
+// The BEP proto types argv / working_directory / env name+value as bytes
+// — Bazel exposes filesystem paths and OS environment values that may
+// contain arbitrary bytes. We validate UTF-8 on every conversion (pdata
+// accepts any string but OTLP/JSON exporters reject invalid encoding,
+// which is total-batch loss) and skip entries that fail. Per-value bytes
+// are clipped at maxAttrValueLen via truncateAttrValue. Slice lengths are
+// capped to keep span payload bounded; env entries are sorted by name
+// server-side so the emission is deterministic regardless of how Bazel
+// iterates the process environ.
+func (s *invocationState) applyExecRequestAttrs(span ptrace.Span, truncs []truncationRecord) []truncationRecord {
 	er := s.execRequest
 	if er == nil {
-		return
+		return truncs
 	}
 
-	// Always-on attrs first: count and should_exec are safe to emit even
-	// when details are redacted, giving operators an "event arrived" signal.
-	span.Attributes().PutInt("bazel.run.environment_variable_count", int64(len(er.GetEnvironmentVariable())))
-	span.Attributes().PutBool("bazel.run.should_exec", er.GetShouldExec())
+	attrs := span.Attributes()
+
+	// Always-on counts/bool give operators an "event arrived" signal even
+	// when the redacted variants suppress all detail. Counts reflect the
+	// raw payload size, not the post-cap slice length, so operators see
+	// the truth even when applyExecRequest{Argv,Env,EnvToClear} truncates.
+	attrs.PutInt("bazel.run.argv_count", int64(len(er.GetArgv())))
+	attrs.PutInt("bazel.run.environment_variable_count", int64(len(er.GetEnvironmentVariable())))
+	attrs.PutInt("bazel.run.environment_variable_to_clear_count", int64(len(er.GetEnvironmentVariableToClear())))
+	attrs.PutBool("bazel.run.should_exec", er.GetShouldExec())
 
 	if s.pii.IncludeWorkingDir {
-		if wd := er.GetWorkingDirectory(); len(wd) > 0 {
-			span.Attributes().PutStr("bazel.run.working_directory", string(wd))
+		if wd := string(er.GetWorkingDirectory()); wd != "" && utf8.ValidString(wd) {
+			attrs.PutStr("bazel.run.working_directory", truncateAttrValue(wd))
 		}
 	}
 
 	if s.pii.IncludeCommandArgs {
-		if argv := er.GetArgv(); len(argv) > 0 {
-			slice := span.Attributes().PutEmptySlice("bazel.run.argv")
-			for _, a := range argv {
-				slice.AppendEmpty().SetStr(string(a))
-			}
-		}
-		if env := er.GetEnvironmentVariable(); len(env) > 0 {
-			slice := span.Attributes().PutEmptySlice("bazel.run.environment")
-			for _, v := range env {
-				m := slice.AppendEmpty().SetEmptyMap()
-				m.PutStr("name", string(v.GetName()))
-				m.PutStr("value", string(v.GetValue()))
-			}
-		}
+		truncs = applyExecRequestArgv(attrs, er.GetArgv(), truncs)
 	}
+
+	if s.pii.IncludeRunEnvironment {
+		truncs = applyExecRequestEnv(attrs, er.GetEnvironmentVariable(), truncs)
+		truncs = applyExecRequestEnvToClear(attrs, er.GetEnvironmentVariableToClear(), truncs)
+	}
+	return truncs
 }
 
-// setExecRequest buffers an ExecRequestConstructed payload for emission on
-// the root span. No-op after the invocation has been flushed.
-func (s *invocationState) setExecRequest(er *bep.ExecRequestConstructed) {
-	if s.flushed || er == nil {
-		return
+// All three apply* helpers maintain a consistent truncationRecord
+// contract: `original` always equals the raw proto length (which matches
+// the always-on `*_count` attrs), and `kept` always equals the actual
+// emitted slice length. The gap between them — whether driven by the
+// hard cap, by UTF-8 skips, or by both — is what operators need to see.
+//
+// argv keeps cap-first (positional adjacency in argv matters: dropping
+// items at the end is more interpretable than dropping them after a sort
+// would shuffle order). env and env-to-clear filter-first because the
+// sort already destroys positional meaning; filtering first keeps the
+// cap from clipping past valid entries we'd then drop again.
+
+// applyExecRequestArgv emits bazel.run.argv.
+func applyExecRequestArgv(attrs pcommon.Map, argv [][]byte, truncs []truncationRecord) []truncationRecord {
+	if len(argv) == 0 {
+		return truncs
 	}
-	s.execRequest = er
+	original := len(argv)
+	if len(argv) > maxRunArgvEntries {
+		// 3-index reslice defends the backing array — even if the caller
+		// later mutates argv (none do today, but the BEP proto generator
+		// could), the receiver's truncated view doesn't accidentally
+		// expose past-cap entries.
+		argv = argv[:maxRunArgvEntries:maxRunArgvEntries]
+	}
+	slice := attrs.PutEmptySlice("bazel.run.argv")
+	for _, a := range argv {
+		v := string(a)
+		if !utf8.ValidString(v) {
+			continue
+		}
+		slice.AppendEmpty().SetStr(truncateAttrValue(v))
+	}
+	if slice.Len() < original {
+		truncs = append(truncs, truncationRecord{
+			attribute: "bazel.run.argv",
+			original:  original,
+			kept:      slice.Len(),
+		})
+	}
+	return truncs
+}
+
+func applyExecRequestEnv(attrs pcommon.Map, env []*bep.EnvironmentVariable, truncs []truncationRecord) []truncationRecord {
+	if len(env) == 0 {
+		return truncs
+	}
+	original := len(env)
+	// UTF-8 filter first — sort destroys positional meaning anyway, so
+	// no information is lost. utf8.Valid on the byte slice avoids the
+	// allocation utf8.ValidString(string(b)) would force.
+	valid := make([]*bep.EnvironmentVariable, 0, len(env))
+	for _, v := range env {
+		if utf8.Valid(v.GetName()) && utf8.Valid(v.GetValue()) {
+			valid = append(valid, v)
+		}
+	}
+	// SliceStable so two entries with the same name (rare but allowed by
+	// repeated EnvironmentVariable) keep their wire order.
+	sort.SliceStable(valid, func(i, j int) bool {
+		return string(valid[i].GetName()) < string(valid[j].GetName())
+	})
+	if len(valid) > maxRunEnvEntries {
+		valid = valid[:maxRunEnvEntries]
+	}
+	slice := attrs.PutEmptySlice("bazel.run.environment")
+	for _, v := range valid {
+		m := slice.AppendEmpty().SetEmptyMap()
+		m.PutStr("name", truncateAttrValue(string(v.GetName())))
+		m.PutStr("value", truncateAttrValue(string(v.GetValue())))
+	}
+	if slice.Len() < original {
+		truncs = append(truncs, truncationRecord{
+			attribute: "bazel.run.environment",
+			original:  original,
+			kept:      slice.Len(),
+		})
+	}
+	return truncs
+}
+
+func applyExecRequestEnvToClear(attrs pcommon.Map, clearList [][]byte, truncs []truncationRecord) []truncationRecord {
+	if len(clearList) == 0 {
+		return truncs
+	}
+	original := len(clearList)
+	names := make([]string, 0, len(clearList))
+	for _, b := range clearList {
+		s := string(b)
+		if utf8.ValidString(s) {
+			names = append(names, s)
+		}
+	}
+	sort.Strings(names)
+	if len(names) > maxRunEnvClearEntries {
+		names = names[:maxRunEnvClearEntries]
+	}
+	slice := attrs.PutEmptySlice("bazel.run.environment_variable_to_clear")
+	for _, name := range names {
+		slice.AppendEmpty().SetStr(truncateAttrValue(name))
+	}
+	if slice.Len() < original {
+		truncs = append(truncs, truncationRecord{
+			attribute: "bazel.run.environment_variable_to_clear",
+			original:  original,
+			kept:      slice.Len(),
+		})
+	}
+	return truncs
+}
+
+// lateRunSpan emits a standalone bazel.run span carrying the bazel.run.*
+// attributes for an ExecRequestConstructed event that arrived after the
+// main batch was flushed. Bazel's BEP doc places ExecRequestConstructed
+// "after a successful build and before trying to execute" — i.e.
+// potentially after BuildFinished — so the post-flush path is the
+// production path, not defense-in-depth. Without it, every `bazel run`
+// invocation would silently emit empty bazel.run.* attributes.
+//
+// The span is parented to the (already-emitted) root span via
+// state.rootSpanID so consumers correlate it as a child of the build.
+//
+// Filter-exemption contract: bazel.run.* carries displaced root-span
+// data (the attrs would have landed on bazel.build had the event arrived
+// pre-flush). The root span itself is filter-exempt by design, so this
+// span is too — gating only the post-flush path would create wire-order-
+// dependent output across {drop, build_only, targets, verbose} which is
+// strictly worse than uniform emission. A symmetric receiver-wide
+// `allowRun()` gate is tracked separately as a follow-up.
+//
+// The span is zero-width at `at` (event-processing instant). The Fetch
+// proto and ExecRequestConstructed both lack per-event timestamps;
+// stamping a zero-width instant is the right shape — non-zero timestamps
+// matter to OTLP backends for correlation, but inferring a duration
+// would fabricate data.
+func (s *invocationState) lateRunSpan(at time.Time) (ptrace.Traces, []truncationRecord) {
+	traces, ss := newTracesPayload()
+	span := ss.Spans().AppendEmpty()
+	span.SetTraceID(s.traceID)
+	span.SetSpanID(spanIDFromIdentity(s.uuid, "run"))
+	span.SetParentSpanID(s.rootSpanID)
+	span.SetName("bazel.run")
+	span.SetKind(ptrace.SpanKindInternal)
+	ts := pcommon.NewTimestampFromTime(at)
+	span.SetStartTimestamp(ts)
+	span.SetEndTimestamp(ts)
+	truncs := s.applyExecRequestAttrs(span, nil)
+	return traces, truncs
 }
 
 // recordAbort stores the first abort reason and description on the invocation

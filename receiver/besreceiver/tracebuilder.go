@@ -806,23 +806,80 @@ func truncateUTF8(s string, maxBytes int) (string, bool) {
 	return s[:end], true
 }
 
-// handleExecRequestConstructed buffers the ExecRequestConstructed payload on
-// the invocation state for emission as bazel.run.* attributes on the root
-// span. Emitted by Bazel only for `bazel run`, after the build succeeds and
-// just before the run target is exec'd. One event per invocation; post-flush
-// arrivals are dropped (the root span is already out).
-func (tb *TraceBuilder) handleExecRequestConstructed(_ context.Context, invocations map[string]*invocationState, invocationID string, er *bep.ExecRequestConstructed) error {
+// handleExecRequestConstructed routes an ExecRequestConstructed payload to
+// the right span. Emitted by Bazel only for `bazel run`, "announced only
+// after a successful build and before trying to execute" per the BEP proto
+// — i.e. potentially after BuildFinished. Two paths:
+//
+//   - Pre-flush: buffer on invocationState; writeRootSpan stamps bazel.run.*
+//     onto the root span at finalize time.
+//   - Post-flush: emit a standalone bazel.run span (parented to the
+//     already-flushed root) carrying the same attrs. Without this, every
+//     `bazel run` invocation would silently emit empty bazel.run.* attrs.
+//
+// One event per invocation per the BEP contract; BES gRPC reconnect/replay
+// can violate that, so the post-flush path additionally guards on
+// state.runEmitted to avoid emitting duplicate-SpanID `bazel.run` spans.
+func (tb *TraceBuilder) handleExecRequestConstructed(ctx context.Context, invocations map[string]*invocationState, invocationID string, er *bep.ExecRequestConstructed) error {
 	state := invocations[invocationID]
-	if state == nil {
+	if state == nil || er == nil {
 		return nil
 	}
-	state.setExecRequest(er)
-	tb.logger.Debug("ExecRequestConstructed received",
+
+	if !state.flushed {
+		// Pre-flush: buffer for writeRootSpan to stamp on root. Re-stamping
+		// the same root span on a duplicate event is idempotent (same
+		// attribute keys) so no separate guard is needed here.
+		state.execRequest = er
+		tb.logger.Debug("ExecRequestConstructed received (pre-flush)",
+			zap.String("invocation_id", invocationID),
+			zap.Int("argv_count", len(er.GetArgv())),
+			zap.Int("env_var_count", len(er.GetEnvironmentVariable())),
+			zap.Int("env_to_clear_count", len(er.GetEnvironmentVariableToClear())),
+			zap.Bool("should_exec", er.GetShouldExec()),
+		)
+		return nil
+	}
+
+	// Post-flush: a duplicate event would create a second `bazel.run` span
+	// with the same SpanID — backends collapse or reject. Guard once and
+	// drop the duplicate with a Warn so operators see the abnormal sequence.
+	if state.runEmitted {
+		tb.logger.Warn("Duplicate post-flush ExecRequestConstructed dropped",
+			zap.String("invocation_id", invocationID),
+		)
+		return nil
+	}
+	state.execRequest = er
+
+	// Info severity (not Debug) so the abnormal sequencing is visible in
+	// production deployments — this is the only signal that bazel.run.*
+	// data took the displaced-span path rather than landing on root.
+	tb.logger.Info("ExecRequestConstructed late arrival — emitting standalone bazel.run span",
 		zap.String("invocation_id", invocationID),
-		zap.Int("argv_len", len(er.GetArgv())),
-		zap.Int("env_count", len(er.GetEnvironmentVariable())),
+		zap.Int("argv_count", len(er.GetArgv())),
+		zap.Int("env_var_count", len(er.GetEnvironmentVariable())),
+		zap.Int("env_to_clear_count", len(er.GetEnvironmentVariableToClear())),
 		zap.Bool("should_exec", er.GetShouldExec()),
 	)
+	traces, truncs := state.lateRunSpan(time.Now())
+	for _, tr := range truncs {
+		tb.logger.Warn("Truncated bazel.run.* attribute",
+			zap.String("invocation_id", invocationID),
+			zap.String("attribute", tr.attribute),
+			zap.Int("original_count", tr.original),
+			zap.Int("kept", tr.kept),
+		)
+	}
+	// Set runEmitted only AFTER the consumer accepts the payload. The
+	// `invocations` map persists across BES stream reconnects (per
+	// TraceBuilder.run lifetime, not per stream), so a retryable consumer
+	// error must NOT commit the flag — otherwise the replayed event Bazel
+	// resends after reconnect would be silently dropped here.
+	if err := tb.consumeAndRecord(ctx, traces); err != nil {
+		return err
+	}
+	state.runEmitted = true
 	return nil
 }
 
