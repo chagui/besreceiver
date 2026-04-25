@@ -165,7 +165,7 @@ func makeBuildMetadataOBE(t testing.TB, invID string, seqNum int64, entries map[
 // id (BuildEventId.pattern.pattern); targetCount is the number of synthetic
 // TargetConfigured children used to represent how many targets the
 // expansion resolved to. Child labels are irrelevant — the receiver only
-// counts them.
+// counts TargetConfigured children.
 func makePatternExpandedOBE(t testing.TB, invID string, seqNum int64, patterns []string, targetCount int) *pb.OrderedBuildEvent {
 	t.Helper()
 	children := make([]*bep.BuildEventId, 0, targetCount)
@@ -185,6 +185,71 @@ func makePatternExpandedOBE(t testing.TB, invID string, seqNum int64, patterns [
 			},
 		},
 		Children: children,
+		Payload: &bep.BuildEvent_Expanded{
+			Expanded: &bep.PatternExpanded{},
+		},
+	})
+}
+
+// makePatternExpandedMixedChildrenOBE builds a PatternExpanded event whose
+// children mix TargetConfigured ids with other id shapes (nested
+// PatternExpanded, UnconfiguredLabel). Used to verify the receiver counts
+// only TargetConfigured children when stamping target_count.
+func makePatternExpandedMixedChildrenOBE(t testing.TB, invID string, seqNum int64, patterns []string, targetConfiguredCount, nestedPatternCount, unconfiguredLabelCount int) *pb.OrderedBuildEvent {
+	t.Helper()
+	children := make([]*bep.BuildEventId, 0, targetConfiguredCount+nestedPatternCount+unconfiguredLabelCount)
+	for i := range targetConfiguredCount {
+		children = append(children, &bep.BuildEventId{
+			Id: &bep.BuildEventId_TargetConfigured{
+				TargetConfigured: &bep.BuildEventId_TargetConfiguredId{
+					Label: fmt.Sprintf("//pattern_child:tc%d", i),
+				},
+			},
+		})
+	}
+	for i := range nestedPatternCount {
+		children = append(children, &bep.BuildEventId{
+			Id: &bep.BuildEventId_Pattern{
+				Pattern: &bep.BuildEventId_PatternExpandedId{
+					Pattern: []string{fmt.Sprintf("//nested%d/...", i)},
+				},
+			},
+		})
+	}
+	for i := range unconfiguredLabelCount {
+		children = append(children, &bep.BuildEventId{
+			Id: &bep.BuildEventId_UnconfiguredLabel{
+				UnconfiguredLabel: &bep.BuildEventId_UnconfiguredLabelId{
+					Label: fmt.Sprintf("//pattern_child:un%d", i),
+				},
+			},
+		})
+	}
+	return makeOrderedBuildEvent(t, invID, seqNum, &bep.BuildEvent{
+		Id: &bep.BuildEventId{
+			Id: &bep.BuildEventId_Pattern{
+				Pattern: &bep.BuildEventId_PatternExpandedId{Pattern: patterns},
+			},
+		},
+		Children: children,
+		Payload: &bep.BuildEvent_Expanded{
+			Expanded: &bep.PatternExpanded{},
+		},
+	})
+}
+
+// makePatternSkippedOBE builds a PatternExpanded payload riding on a
+// pattern_skipped id (Bazel emits this for parts of a pattern skipped under
+// --keep_going). The children list is irrelevant — skipped patterns by
+// definition did not expand to runnable targets.
+func makePatternSkippedOBE(t testing.TB, invID string, seqNum int64, patterns []string) *pb.OrderedBuildEvent {
+	t.Helper()
+	return makeOrderedBuildEvent(t, invID, seqNum, &bep.BuildEvent{
+		Id: &bep.BuildEventId{
+			Id: &bep.BuildEventId_PatternSkipped{
+				PatternSkipped: &bep.BuildEventId_PatternExpandedId{Pattern: patterns},
+			},
+		},
 		Payload: &bep.BuildEvent_Expanded{
 			Expanded: &bep.PatternExpanded{},
 		},
