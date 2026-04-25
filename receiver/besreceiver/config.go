@@ -48,7 +48,42 @@ type Config struct {
 	// Summary controls aggregate build counters stamped on the root span.
 	// See SummaryConfig.
 	Summary SummaryConfig `mapstructure:"summary"`
+
+	// Progress gates routing of Bazel Progress BEP events (streaming
+	// stdout/stderr chunks) through the OTel logs pipeline. Defaults to
+	// disabled to preserve pre-feature behaviour — Progress payloads can be
+	// large and contain anything Bazel prints, so operators must opt in. See
+	// ProgressConfig.
+	Progress ProgressConfig `mapstructure:"progress"`
 }
+
+// ProgressConfig controls emission of Progress BEP events as log records.
+// When Enabled is false (default), Progress events are silently dropped; when
+// true, each non-empty stream (stdout/stderr) on a Progress event produces
+// one log record with severity INFO (stdout) or ERROR (stderr).
+//
+// MaxChunkSize caps the body size per record: chunks exceeding it are
+// truncated and stamped with bazel.progress.truncated=true plus
+// bazel.progress.original_bytes=N. A value of 0 disables the cap.
+type ProgressConfig struct {
+	// Enabled is the master switch. Defaults to false — Progress payloads
+	// may contain command lines, file paths, env vars, or secrets echoed by
+	// actions, and they are the largest events on the wire in practice.
+	Enabled bool `mapstructure:"enabled"`
+	// MaxChunkSize is the maximum body size (bytes) per emitted log record.
+	// Chunks larger than this are truncated at the byte boundary and
+	// annotated with bazel.progress.truncated=true. Zero means unlimited.
+	// Negative values are rejected at Validate.
+	MaxChunkSize int `mapstructure:"max_chunk_size"`
+}
+
+// defaultProgressMaxChunkSize bounds Progress log bodies to 64 KiB by default.
+// A single Bazel Progress payload can span hundreds of MiB on large builds;
+// routing the full content untrimmed into the logs pipeline would blow the
+// default OTLP batch size and inflate backend storage cost. 64 KiB keeps a
+// useful amount of context (~1000 lines of typical build output) while leaving
+// the operator room to raise or lower the cap explicitly.
+const defaultProgressMaxChunkSize = 64 * 1024
 
 // HighCardinalityCaps configures per-attribute limits on the Slice[Map]
 // attributes emitted on the bazel.metrics span for high-cardinality
@@ -187,6 +222,9 @@ func (cfg *Config) Validate() error {
 	}
 	if cfg.MaxActionDataEntries < 0 {
 		return fmt.Errorf("max_action_data_entries must not be negative, got %d", cfg.MaxActionDataEntries)
+	}
+	if cfg.Progress.MaxChunkSize < 0 {
+		return fmt.Errorf("progress.max_chunk_size must not be negative, got %d", cfg.Progress.MaxChunkSize)
 	}
 	if err := cfg.Filter.Validate(); err != nil {
 		return err

@@ -64,6 +64,9 @@ type TraceBuilderConfig struct {
 	Filter FilterConfig
 	// Summary gates bazel.summary.* aggregate attributes on the root span.
 	Summary SummaryConfig
+	// Progress configures Progress BEP event routing to the logs pipeline.
+	// Zero value = disabled, no Progress-derived log records emitted.
+	Progress ProgressConfig
 }
 
 // TraceBuilder converts BEP events into OTel traces, logs, and metrics.
@@ -102,6 +105,11 @@ type TraceBuilder struct {
 	// Threaded into invocationState so the recording calls in addTarget /
 	// addAction / addTestResult / summarizeTarget stay self-contained.
 	summary SummaryConfig
+
+	// progress gates Progress BEP event routing to the logs pipeline. Copied
+	// from TraceBuilderConfig.Progress at construction and consulted per
+	// event in handleProgress.
+	progress ProgressConfig
 
 	// Cumulative counters for cross-invocation metrics.
 	counters *cumulativeCounters
@@ -160,6 +168,7 @@ func NewTraceBuilder(tracesConsumer consumer.Traces, logsConsumer consumer.Logs,
 		maxActionDataEntries: cfg.MaxActionDataEntries,
 		filter:               NewFilter(cfg.Filter),
 		summary:              cfg.Summary,
+		progress:             cfg.Progress,
 		counters:             newCumulativeCounters(pcommon.NewTimestampFromTime(time.Now())),
 		activeInvocations:    activeInvocations,
 		eventsProcessed:      eventsProcessed,
@@ -323,11 +332,18 @@ func (tb *TraceBuilder) processEvent(ctx context.Context, invocations map[string
 			return nil
 		}
 		return tb.handleTestSummary(ctx, invocations, invocationID, event.GetId(), p.TestSummary)
+	case *bep.BuildEvent_Progress:
+		if p.Progress == nil {
+			return nil
+		}
+		return tb.handleProgress(ctx, invocations, invocationID, event.GetId(), p.Progress)
 	}
 	return nil
 }
 
 // eventTypeName returns a short name for the BEP event type, used as a metric attribute.
+//
+//nolint:gocyclo // Flat payload dispatch mirrors processEvent; grows with handled types.
 func eventTypeName(event *bep.BuildEvent) string {
 	switch event.GetPayload().(type) {
 	case *bep.BuildEvent_Started:
@@ -352,6 +368,8 @@ func eventTypeName(event *bep.BuildEvent) string {
 		return "target_complete"
 	case *bep.BuildEvent_TestSummary:
 		return "test_summary"
+	case *bep.BuildEvent_Progress:
+		return "progress"
 	case *bep.BuildEvent_Configuration:
 		return "configuration"
 	case *bep.BuildEvent_OptionsParsed:
@@ -715,15 +733,25 @@ func reconstructCommandLine(cl *commandline.CommandLine) string {
 		}
 	}
 	joined := strings.Join(parts, " ")
-	if len(joined) <= commandLineMaxBytes {
-		return joined
+	clipped, truncated := truncateUTF8(joined, commandLineMaxBytes)
+	if !truncated {
+		return clipped
 	}
-	// Back off to rune boundary so we never emit invalid UTF-8.
-	end := commandLineMaxBytes
-	for end > 0 && !utf8.RuneStart(joined[end]) {
+	return clipped + "…"
+}
+
+// truncateUTF8 returns s clipped to at most maxBytes, backed off to a rune
+// boundary so the result is valid UTF-8. maxBytes <= 0 disables the cap.
+// The boolean reports whether truncation occurred.
+func truncateUTF8(s string, maxBytes int) (string, bool) {
+	if maxBytes <= 0 || len(s) <= maxBytes {
+		return s, false
+	}
+	end := maxBytes
+	for end > 0 && !utf8.RuneStart(s[end]) {
 		end--
 	}
-	return joined[:end] + "…"
+	return s[:end], true
 }
 
 // handleTargetComplete enriches an existing bazel.target span with outcome
@@ -779,6 +807,93 @@ func (tb *TraceBuilder) handleTestSummary(ctx context.Context, invocations map[s
 		},
 	)
 	return nil
+}
+
+// handleProgress routes Bazel Progress BEP events (streaming stdout/stderr
+// chunks) through the logs pipeline. The feature is gated behind
+// TraceBuilder.progress.Enabled — when disabled, Progress events are silently
+// dropped. Each non-empty stream produces one log record at INFO severity.
+// Chunks exceeding progress.MaxChunkSize are clipped at a UTF-8 rune boundary
+// and stamped with bazel.progress.truncated=true plus bazel.progress.bytes=N
+// (original byte length). MaxChunkSize == 0 disables the cap.
+//
+// stderr is emitted before stdout to match the BEP spec ordering contract
+// (build_event_stream.proto: "stderr has been emitted before stdout if both
+// are present"). The opaque_count from BuildEventId is stamped on each record
+// so consumers can re-establish chunk order across streams.
+//
+// Silently dropped when the invocation has no state (Progress arriving before
+// BuildStarted, or after the invocation is reaped) or once the trace batch
+// has been flushed — matches the gate used by every other handler.
+func (tb *TraceBuilder) handleProgress(ctx context.Context, invocations map[string]*invocationState, invocationID string, eventID *bep.BuildEventId, progress *bep.Progress) error {
+	if !tb.progress.Enabled {
+		return nil
+	}
+	state := invocations[invocationID]
+	if state == nil || state.flushed {
+		return nil
+	}
+	// Progress has no timestamp field; use invocation-scoped now so records
+	// are orderable even when handled out of wall-clock order by consumers.
+	ts := time.Now()
+	opaqueCount := eventID.GetProgress().GetOpaqueCount()
+	if stderr := progress.GetStderr(); stderr != "" {
+		tb.emitProgressLog(ctx, state, invocationID, "stderr", stderr, opaqueCount, ts)
+	}
+	if stdout := progress.GetStdout(); stdout != "" {
+		tb.emitProgressLog(ctx, state, invocationID, "stdout", stdout, opaqueCount, ts)
+	}
+	return nil
+}
+
+// emitProgressLog builds and emits a single log record for a Progress stream
+// chunk. Severity is INFO regardless of stream — Bazel routes normal-build
+// chatter ("Loading:", "Analyzing:", "Build completed successfully") through
+// stderr, so mapping stderr to ERROR would page on every green build.
+// Operators who need elevation can stack a transformprocessor downstream.
+func (tb *TraceBuilder) emitProgressLog(ctx context.Context, state *invocationState, invocationID, stream, body string, opaqueCount int32, ts time.Time) {
+	if tb.logsConsumer == nil {
+		return
+	}
+
+	originalBytes := len(body)
+	body, truncated := truncateUTF8(body, tb.progress.MaxChunkSize)
+
+	logs, lr := newLogPayload()
+	lr.SetTimestamp(pcommon.NewTimestampFromTime(ts))
+	lr.SetSeverityNumber(plog.SeverityNumberInfo)
+	lr.SetSeverityText(plog.SeverityNumberInfo.String())
+	lr.Body().SetStr(body)
+
+	attrs := lr.Attributes()
+	attrs.PutStr("event.name", "bazel.progress")
+	attrs.PutStr("bazel.invocation_id", invocationID)
+	attrs.PutStr("bazel.progress.stream", stream)
+	attrs.PutInt("bazel.progress.bytes", int64(originalBytes))
+	attrs.PutBool("bazel.progress.truncated", truncated)
+	attrs.PutInt("bazel.progress.opaque_count", int64(opaqueCount))
+
+	lr.SetTraceID(state.traceID)
+
+	if err := tb.logsConsumer.ConsumeLogs(ctx, logs); err != nil {
+		tb.logger.Warn("Failed to emit Progress log record",
+			zap.String("invocation_id", invocationID),
+			zap.String("stream", stream),
+			zap.Error(err),
+		)
+	}
+}
+
+// newLogPayload returns an empty plog.Logs pre-populated with the standard
+// resource (service.name=bazel) and scope (besreceiver), plus the empty log
+// record to be populated by the caller.
+func newLogPayload() (plog.Logs, plog.LogRecord) {
+	logs := plog.NewLogs()
+	rl := logs.ResourceLogs().AppendEmpty()
+	rl.Resource().Attributes().PutStr("service.name", "bazel")
+	sl := rl.ScopeLogs().AppendEmpty()
+	sl.Scope().SetName("besreceiver")
+	return logs, sl.LogRecords().AppendEmpty()
 }
 
 func (tb *TraceBuilder) handleBuildMetrics(ctx context.Context, invocations map[string]*invocationState, invocationID string, metrics *bep.BuildMetrics) error {
@@ -869,13 +984,7 @@ func (tb *TraceBuilder) emitLog(ctx context.Context, state *invocationState, inv
 		return
 	}
 
-	logs := plog.NewLogs()
-	rl := logs.ResourceLogs().AppendEmpty()
-	rl.Resource().Attributes().PutStr("service.name", "bazel")
-	sl := rl.ScopeLogs().AppendEmpty()
-	sl.Scope().SetName("besreceiver")
-
-	lr := sl.LogRecords().AppendEmpty()
+	logs, lr := newLogPayload()
 	if !ts.IsZero() {
 		lr.SetTimestamp(pcommon.NewTimestampFromTime(ts))
 	}
