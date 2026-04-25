@@ -86,6 +86,11 @@ type invocationState struct {
 	// buildMetadata buffers sanitized --build_metadata entries until the root
 	// span is emitted. Keys are pre-sanitized; values are pre-truncated.
 	buildMetadata map[string]string
+	// patterns buffers PatternExpanded aggregates keyed by pattern string;
+	// value is the summed target_count across events for the same pattern.
+	// Emitted as the bazel.patterns Slice[Map] on the root span during
+	// writeRootSpan. Capped at caps.Patterns entries with a warning log.
+	patterns map[string]int64
 
 	// configurations maps config id → Configuration payload. Populated by
 	// handleConfiguration so handleTargetConfigured can stamp config attrs
@@ -465,32 +470,37 @@ func applyResourceUsage(span ptrace.Span, usage []*bep.TestResult_ExecutionInfo_
 }
 
 // finalize appends the root span with start/end timestamps and exit code,
-// marks the invocation as flushed, and returns the accumulated traces batch.
-func (s *invocationState) finalize(finished *bep.BuildFinished) (ptrace.Traces, bool) {
+// marks the invocation as flushed, and returns the accumulated traces batch
+// together with any truncation records produced by root-span attrs (e.g.
+// bazel.patterns exceeding its cap). The caller is expected to log one
+// warning per record with invocation context.
+func (s *invocationState) finalize(finished *bep.BuildFinished) (ptrace.Traces, []truncationRecord, bool) {
 	if s.flushed {
-		return ptrace.Traces{}, false
+		return ptrace.Traces{}, nil, false
 	}
 
-	s.writeRootSpan(finished)
+	truncs := s.writeRootSpan(finished)
 
 	s.flushed = true
 	// Any entries left in pendingReparent represent actions/tests whose
 	// TargetConfigured never arrived. Their spans stay parented to root
 	// (explicit orphan), matching prior behavior.
 	s.pendingReparent = nil
-	return s.pendingTraces, true
+	return s.pendingTraces, truncs, true
 }
 
 // writeRootSpan appends the root bazel.build span to the pending traces batch.
 // finished may be nil when the root span is emitted without BuildFinished
 // (e.g. the reaper flushing an aborted build that never sent BuildFinished).
+// Returns any truncation records produced by capped root-span attrs
+// (bazel.patterns); caller logs one warning per record.
 //
 // When abortRecorded is true, abort attributes are written alongside any
 // existing exit-code attributes and the status message is set to
 // "aborted: <reason>: <description>". Abort is the root cause, so its
 // status takes precedence; the exit code is the consequence and its
 // attributes remain for observability.
-func (s *invocationState) writeRootSpan(finished *bep.BuildFinished) {
+func (s *invocationState) writeRootSpan(finished *bep.BuildFinished) []truncationRecord {
 	span := s.appendSpan()
 	span.SetSpanID(s.rootSpanID)
 	// command is a free-form string in the proto, but in practice bounded to
@@ -548,6 +558,10 @@ func (s *invocationState) writeRootSpan(finished *bep.BuildFinished) {
 		span.Status().SetCode(ptrace.StatusCodeError)
 		span.Status().SetMessage("aborted: " + s.abortReason + ": " + s.abortDescription)
 	}
+
+	var truncs []truncationRecord
+	truncs = s.applyPatternAttrs(span, truncs)
+	return truncs
 }
 
 // applyStartedAttributes writes root-span attributes derived from the
@@ -710,6 +724,33 @@ func (s *invocationState) addBuildMetadata(md map[string]string) {
 		}
 		s.buildMetadata[key] = truncateAttrValue(md[rawKey])
 		kept = len(s.buildMetadata)
+	}
+}
+
+// addPatternExpanded aggregates a PatternExpanded event onto the invocation
+// state for emission as bazel.patterns on the root span. patterns is the
+// list of pattern strings from BuildEventId_PatternExpandedId (a single BEP
+// event may carry multiple patterns); targetCount is the number of targets
+// the expansion resolved to (len of the event's children). Empty patterns
+// and zero-target expansions are skipped. Aggregation sums target_count for
+// duplicate pattern keys. The cap is enforced at emission time in
+// applyPatternAttrs, not here, so late-arriving low-cardinality aggregates
+// aren't silently dropped.
+func (s *invocationState) addPatternExpanded(patterns []string, targetCount int64) {
+	if s.flushed {
+		return
+	}
+	if targetCount <= 0 {
+		return
+	}
+	if s.patterns == nil {
+		s.patterns = make(map[string]int64)
+	}
+	for _, p := range patterns {
+		if p == "" {
+			continue
+		}
+		s.patterns[p] += targetCount
 	}
 }
 
@@ -896,6 +937,49 @@ func (s *invocationState) applySummaryAttributes(span ptrace.Span) {
 	attrs.PutInt("bazel.summary.passed_tests", s.summaryCounts.PassedTests)
 	attrs.PutInt("bazel.summary.failed_tests", s.summaryCounts.FailedTests)
 	attrs.PutInt("bazel.summary.flaky_tests", s.summaryCounts.FlakyTests)
+}
+
+// applyPatternAttrs emits bazel.patterns as a Slice[Map] on the root span
+// from buffered PatternExpanded aggregates. Each entry is {pattern,
+// target_count}. Entries are sorted by pattern string so truncation is
+// deterministic across reruns with the same inputs. When the aggregate
+// count exceeds caps.Patterns the tail is dropped and one truncationRecord
+// is appended; caller logs the warning.
+//
+// No attribute is emitted when s.patterns is empty — absent vs present-
+// but-empty is a meaningful distinction downstream.
+func (s *invocationState) applyPatternAttrs(span ptrace.Span, truncs []truncationRecord) []truncationRecord {
+	if len(s.patterns) == 0 {
+		return truncs
+	}
+	keys := make([]string, 0, len(s.patterns))
+	for k := range s.patterns {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	limit := s.caps.withDefaults().Patterns
+	original := len(keys)
+	kept := original
+	if limit > 0 && original > limit {
+		keys = keys[:limit]
+		kept = limit
+	}
+
+	slice := span.Attributes().PutEmptySlice("bazel.patterns")
+	for _, k := range keys {
+		m := slice.AppendEmpty().SetEmptyMap()
+		m.PutStr("pattern", k)
+		m.PutInt("target_count", s.patterns[k])
+	}
+	if kept < original {
+		truncs = append(truncs, truncationRecord{
+			attribute: "bazel.patterns",
+			original:  original,
+			kept:      kept,
+		})
+	}
+	return truncs
 }
 
 // nullConfigID is Bazel's sentinel for the null configuration — a TargetCompletedId
@@ -1534,25 +1618,28 @@ func durationToMs(d *durationpb.Duration) int64 {
 	return d.AsDuration().Milliseconds()
 }
 
-// flushOrphaned returns pending traces for invocations that were never finished.
-// Used by the reaper to flush spans before deleting stale state.
+// flushOrphaned returns pending traces for invocations that were never finished,
+// together with any truncation records produced when the root span is emitted
+// on the abort path. Used by the reaper to flush spans before deleting stale
+// state.
 //
 // When an abort was recorded but BuildFinished never arrived, also emit the
 // root span (stamped with abort attrs via writeRootSpan) so the abort signal
 // is preserved. Otherwise the existing pending spans are flushed as-is,
 // matching prior behavior for timed-out but non-aborted invocations.
-func (s *invocationState) flushOrphaned() (ptrace.Traces, bool) {
+func (s *invocationState) flushOrphaned() (ptrace.Traces, []truncationRecord, bool) {
 	if s.flushed {
-		return ptrace.Traces{}, false
+		return ptrace.Traces{}, nil, false
 	}
 	if !s.abortRecorded && s.pendingTraces.SpanCount() == 0 {
-		return ptrace.Traces{}, false
+		return ptrace.Traces{}, nil, false
 	}
+	var truncs []truncationRecord
 	if s.abortRecorded {
-		s.writeRootSpan(nil)
+		truncs = s.writeRootSpan(nil)
 	}
 	s.flushed = true
-	return s.pendingTraces, true
+	return s.pendingTraces, truncs, true
 }
 
 // resolveTargetSpan looks up the parent span for an action or test result.

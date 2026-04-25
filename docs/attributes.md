@@ -54,6 +54,7 @@ without `BuildFinished`, from the reaper path.
 | `bazel.run.environment_variable_count` | int                | `len(ExecRequestConstructed.environment_variable)` (only on `bazel run`) |
 | `bazel.run.environment`                | Slice[Map]         | `ExecRequestConstructed.environment_variable` (only on `bazel run`) — `{name, value}` entries; **PII**, requires `include_command_args` |
 | `bazel.run.should_exec`                | bool               | `ExecRequestConstructed.should_exec` (only on `bazel run`) |
+| `bazel.patterns`                       | Slice[Map]         | `PatternExpanded` — one entry per requested pattern: `{pattern, target_count}`. Aggregated across events; capped by `high_cardinality_caps.patterns` (default 50). |
 
 The `bazel.run.*` group is populated only for `bazel run` invocations, where
 Bazel emits `ExecRequestConstructed` after the build succeeds and before the
@@ -62,6 +63,16 @@ these attributes. `bazel.run.environment_variable_count` and
 `bazel.run.should_exec` are always emitted when the event arrives (counts
 and bools carry no PII); argv, environment, and working_directory are
 PII-gated per the table above.
+
+`bazel.patterns` captures what the user asked for: e.g. a `bazel test //...`
+invocation that fans out to 1,400 tests emits a single entry
+`{pattern: "//...", target_count: 1400}`. Patterns are aggregated by
+pattern string across multiple `PatternExpanded` events (unlikely in
+practice, but preserved for correctness). Empty pattern strings and
+zero-target expansions are skipped; when no `PatternExpanded` event
+arrives the attribute is absent entirely. Exceeding
+`high_cardinality_caps.patterns` truncates in sorted pattern order and
+emits a Warn log with the invocation id, original count, and kept count.
 
 Key sanitization for `bazel.workspace.*` and `bazel.metadata.*`: lowercase,
 collapse whitespace to `_`, strip characters outside `[a-z0-9_.]`, trim

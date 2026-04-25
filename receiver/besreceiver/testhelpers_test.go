@@ -156,6 +156,37 @@ func makeBuildMetadataOBE(t testing.TB, invID string, seqNum int64, entries map[
 	})
 }
 
+// makePatternExpandedOBE builds an OrderedBuildEvent for a PatternExpanded
+// payload. patterns are the expanded pattern strings carried on the event
+// id (BuildEventId.pattern.pattern); targetCount is the number of synthetic
+// TargetConfigured children used to represent how many targets the
+// expansion resolved to. Child labels are irrelevant — the receiver only
+// counts them.
+func makePatternExpandedOBE(t testing.TB, invID string, seqNum int64, patterns []string, targetCount int) *pb.OrderedBuildEvent {
+	t.Helper()
+	children := make([]*bep.BuildEventId, 0, targetCount)
+	for i := range targetCount {
+		children = append(children, &bep.BuildEventId{
+			Id: &bep.BuildEventId_TargetConfigured{
+				TargetConfigured: &bep.BuildEventId_TargetConfiguredId{
+					Label: fmt.Sprintf("//pattern_child:t%d", i),
+				},
+			},
+		})
+	}
+	return makeOrderedBuildEvent(t, invID, seqNum, &bep.BuildEvent{
+		Id: &bep.BuildEventId{
+			Id: &bep.BuildEventId_Pattern{
+				Pattern: &bep.BuildEventId_PatternExpandedId{Pattern: patterns},
+			},
+		},
+		Children: children,
+		Payload: &bep.BuildEvent_Expanded{
+			Expanded: &bep.PatternExpanded{},
+		},
+	})
+}
+
 // makeAbortedOBE builds an OrderedBuildEvent for an Aborted payload. Aborted
 // events can ride on any BuildEventId; this helper uses BuildFinished by
 // default to exercise the "aborts replace another event ID" path. Pass a

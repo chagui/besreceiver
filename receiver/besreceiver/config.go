@@ -87,9 +87,10 @@ const defaultProgressMaxChunkSize = 64 * 1024
 
 // HighCardinalityCaps configures per-attribute limits on the Slice[Map]
 // attributes emitted on the bazel.metrics span for high-cardinality
-// BuildMetrics sub-messages. Emission is span-attribute-only (no standalone
-// metrics) to avoid series explosion in metrics backends. A value of 0 is
-// treated as "use default".
+// BuildMetrics sub-messages, plus the bazel.patterns Slice[Map] stamped on
+// the root span. Emission is span-attribute-only (no standalone metrics) to
+// avoid series explosion in metrics backends. A value of 0 is treated as
+// "use default".
 type HighCardinalityCaps struct {
 	// Garbage caps the number of entries in bazel.metrics.garbage derived from
 	// MemoryMetrics.garbage_metrics. Default: 20.
@@ -101,6 +102,9 @@ type HighCardinalityCaps struct {
 	// bazel.metrics.graph.{dirtied,changed,built,cleaned,evaluated}_values
 	// attributes derived from BuildGraphMetrics. Default: 50.
 	GraphValues int `mapstructure:"graph_values"`
+	// Patterns caps the number of entries in bazel.patterns on the root span,
+	// derived from PatternExpanded events. Default: 50.
+	Patterns int `mapstructure:"patterns"`
 }
 
 // Default caps chosen for typical Bazel invocations; see HighCardinalityCaps
@@ -109,6 +113,7 @@ const (
 	defaultCapGarbage     = 20
 	defaultCapPackageLoad = 100
 	defaultCapGraphValues = 50
+	defaultCapPatterns    = 50
 )
 
 // defaultHighCardinalityCaps returns the documented default caps. Mirrored on
@@ -119,6 +124,7 @@ func defaultHighCardinalityCaps() HighCardinalityCaps {
 		Garbage:     defaultCapGarbage,
 		PackageLoad: defaultCapPackageLoad,
 		GraphValues: defaultCapGraphValues,
+		Patterns:    defaultCapPatterns,
 	}
 }
 
@@ -134,6 +140,9 @@ func (c HighCardinalityCaps) withDefaults() HighCardinalityCaps {
 	}
 	if c.GraphValues <= 0 {
 		c.GraphValues = d.GraphValues
+	}
+	if c.Patterns <= 0 {
+		c.Patterns = d.Patterns
 	}
 	return c
 }
@@ -226,6 +235,9 @@ func (cfg *Config) Validate() error {
 	}
 	if cfg.HighCardinalityCaps.GraphValues < 0 {
 		return fmt.Errorf("high_cardinality_caps.graph_values must not be negative, got %d", cfg.HighCardinalityCaps.GraphValues)
+	}
+	if cfg.HighCardinalityCaps.Patterns < 0 {
+		return fmt.Errorf("high_cardinality_caps.patterns must not be negative, got %d", cfg.HighCardinalityCaps.Patterns)
 	}
 	if cfg.MaxActionDataEntries < 0 {
 		return fmt.Errorf("max_action_data_entries must not be negative, got %d", cfg.MaxActionDataEntries)
