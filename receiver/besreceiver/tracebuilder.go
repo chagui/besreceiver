@@ -337,6 +337,11 @@ func (tb *TraceBuilder) processEvent(ctx context.Context, invocations map[string
 			return nil
 		}
 		return tb.handleProgress(ctx, invocations, invocationID, event.GetId(), p.Progress)
+	case *bep.BuildEvent_ExecRequest:
+		if p.ExecRequest == nil {
+			return nil
+		}
+		return tb.handleExecRequestConstructed(ctx, invocations, invocationID, p.ExecRequest)
 	}
 	return nil
 }
@@ -376,6 +381,8 @@ func eventTypeName(event *bep.BuildEvent) string {
 		return "options_parsed"
 	case *bep.BuildEvent_StructuredCommandLine:
 		return "structured_command_line"
+	case *bep.BuildEvent_ExecRequest:
+		return "exec_request"
 	default:
 		return "other"
 	}
@@ -752,6 +759,26 @@ func truncateUTF8(s string, maxBytes int) (string, bool) {
 		end--
 	}
 	return s[:end], true
+}
+
+// handleExecRequestConstructed buffers the ExecRequestConstructed payload on
+// the invocation state for emission as bazel.run.* attributes on the root
+// span. Emitted by Bazel only for `bazel run`, after the build succeeds and
+// just before the run target is exec'd. One event per invocation; post-flush
+// arrivals are dropped (the root span is already out).
+func (tb *TraceBuilder) handleExecRequestConstructed(_ context.Context, invocations map[string]*invocationState, invocationID string, er *bep.ExecRequestConstructed) error {
+	state := invocations[invocationID]
+	if state == nil {
+		return nil
+	}
+	state.setExecRequest(er)
+	tb.logger.Debug("ExecRequestConstructed received",
+		zap.String("invocation_id", invocationID),
+		zap.Int("argv_len", len(er.GetArgv())),
+		zap.Int("env_count", len(er.GetEnvironmentVariable())),
+		zap.Bool("should_exec", er.GetShouldExec()),
+	)
+	return nil
 }
 
 // handleTargetComplete enriches an existing bazel.target span with outcome

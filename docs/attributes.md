@@ -48,6 +48,19 @@ without `BuildFinished`, from the reaper path.
 | `bazel.options.startup_count`| int    | `len(OptionsParsed.explicit_startup_options)`                    |
 | `bazel.options.command_count`| int    | `len(OptionsParsed.explicit_cmd_line)`                           |
 | `bazel.command_line`         | string | Reconstructed `StructuredCommandLine` — **PII**, requires `include_command_line` |
+| `bazel.run.argv`                       | Slice[string]      | `ExecRequestConstructed.argv` (only on `bazel run`) — **PII**, requires `include_command_args` |
+| `bazel.run.working_directory`          | string             | `ExecRequestConstructed.working_directory` (only on `bazel run`) — **PII**, requires `include_working_dir` |
+| `bazel.run.environment_variable_count` | int                | `len(ExecRequestConstructed.environment_variable)` (only on `bazel run`) |
+| `bazel.run.environment`                | Slice[Map]         | `ExecRequestConstructed.environment_variable` (only on `bazel run`) — `{name, value}` entries; **PII**, requires `include_command_args` |
+| `bazel.run.should_exec`                | bool               | `ExecRequestConstructed.should_exec` (only on `bazel run`) |
+
+The `bazel.run.*` group is populated only for `bazel run` invocations, where
+Bazel emits `ExecRequestConstructed` after the build succeeds and before the
+target is exec'd. `bazel build` / `bazel test` invocations carry none of
+these attributes. `bazel.run.environment_variable_count` and
+`bazel.run.should_exec` are always emitted when the event arrives (counts
+and bools carry no PII); argv, environment, and working_directory are
+PII-gated per the table above.
 
 Key sanitization for `bazel.workspace.*` and `bazel.metadata.*`: lowercase,
 collapse whitespace to `_`, strip characters outside `[a-z0-9_.]`, trim
@@ -186,8 +199,8 @@ receivers:
       include_hostname: false              # bazel.host + host-like workspace/metadata keys
       include_username: false              # bazel.user + user-like workspace/metadata keys
       include_workspace_dir: false         # bazel.workspace_directory + matching workspace/metadata keys
-      include_working_dir: false           # bazel.working_directory + matching workspace/metadata keys
-      include_command_args: false          # bazel.action.command_line
+      include_working_dir: false           # bazel.working_directory + bazel.run.working_directory + matching workspace/metadata keys
+      include_command_args: false          # bazel.action.command_line + bazel.run.argv + bazel.run.environment
       include_action_output_paths: false   # bazel.action.primary_output
       include_workspace_status: false      # bazel.workspace.* pathway (per-key filtered)
       include_build_metadata: false        # bazel.metadata.* pathway (per-key filtered)

@@ -100,6 +100,13 @@ type invocationState struct {
 	commandCount int64
 	commandLine  string
 
+	// execRequest buffers the ExecRequestConstructed payload for emission as
+	// bazel.run.* attrs on the root span. Only one ExecRequestConstructed
+	// event fires per invocation (on successful `bazel run`); later arrivals
+	// would overwrite, but the pattern matches WorkspaceStatus /
+	// StructuredCommandLine buffering where final-value-wins is acceptable.
+	execRequest *bep.ExecRequestConstructed
+
 	// pii opts specific BEP fields into span emission; see PIIConfig.
 	pii PIIConfig
 
@@ -511,6 +518,8 @@ func (s *invocationState) writeRootSpan(finished *bep.BuildFinished) {
 		span.Attributes().PutStr("bazel.command_line", s.commandLine)
 	}
 
+	s.applyExecRequestAttrs(span)
+
 	s.applyContextAttributes(span)
 
 	s.applySummaryAttributes(span)
@@ -559,6 +568,67 @@ func (s *invocationState) applyStartedAttributes(span ptrace.Span) {
 			span.Attributes().PutStr("bazel.user", user)
 		}
 	}
+}
+
+// applyExecRequestAttrs stamps bazel.run.* attributes from a buffered
+// ExecRequestConstructed. No-op when the event was never buffered (the
+// common case for `bazel build` / `bazel test` invocations, which never
+// emit ExecRequestConstructed).
+//
+// Gating matrix:
+//   - bazel.run.argv:                     PII.IncludeCommandArgs
+//   - bazel.run.environment:              PII.IncludeCommandArgs (env often
+//     carries argv-adjacent secrets, so it reuses the same gate)
+//   - bazel.run.working_directory:        PII.IncludeWorkingDir
+//   - bazel.run.environment_variable_count: always emitted (count only, safe)
+//   - bazel.run.should_exec:              always emitted (bool, safe)
+//
+// The BEP proto types argv / working_directory / env name+value as bytes,
+// not string — they are filesystem paths and OS environment values that
+// may contain arbitrary bytes. We cast to string for attribute emission
+// (matching the convention used for other byte-typed BEP fields).
+func (s *invocationState) applyExecRequestAttrs(span ptrace.Span) {
+	er := s.execRequest
+	if er == nil {
+		return
+	}
+
+	// Always-on attrs first: count and should_exec are safe to emit even
+	// when details are redacted, giving operators an "event arrived" signal.
+	span.Attributes().PutInt("bazel.run.environment_variable_count", int64(len(er.GetEnvironmentVariable())))
+	span.Attributes().PutBool("bazel.run.should_exec", er.GetShouldExec())
+
+	if s.pii.IncludeWorkingDir {
+		if wd := er.GetWorkingDirectory(); len(wd) > 0 {
+			span.Attributes().PutStr("bazel.run.working_directory", string(wd))
+		}
+	}
+
+	if s.pii.IncludeCommandArgs {
+		if argv := er.GetArgv(); len(argv) > 0 {
+			slice := span.Attributes().PutEmptySlice("bazel.run.argv")
+			for _, a := range argv {
+				slice.AppendEmpty().SetStr(string(a))
+			}
+		}
+		if env := er.GetEnvironmentVariable(); len(env) > 0 {
+			slice := span.Attributes().PutEmptySlice("bazel.run.environment")
+			for _, v := range env {
+				m := slice.AppendEmpty().SetEmptyMap()
+				m.PutStr("name", string(v.GetName()))
+				m.PutStr("value", string(v.GetValue()))
+			}
+		}
+	}
+}
+
+// setExecRequest buffers an ExecRequestConstructed payload for emission on
+// the root span. No-op after the invocation has been flushed.
+func (s *invocationState) setExecRequest(er *bep.ExecRequestConstructed) {
+	if s.flushed || er == nil {
+		return
+	}
+	s.execRequest = er
 }
 
 // recordAbort stores the first abort reason and description on the invocation

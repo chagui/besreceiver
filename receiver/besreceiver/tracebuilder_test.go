@@ -3096,3 +3096,213 @@ func TestProgress_UnknownInvocationDropped(t *testing.T) {
 
 	require.Equal(t, 0, logsSink.LogRecordCount())
 }
+
+// --- ExecRequestConstructed / bazel.run.* (issue #63) ---
+
+// runExecRequestStream runs a `bazel run` style event sequence (BuildStarted →
+// ExecRequestConstructed → BuildFinished) through the TraceBuilder with the
+// given PII config and returns the captured traces sink.
+func runExecRequestStream(t *testing.T, pii PIIConfig) *consumertest.TracesSink {
+	t.Helper()
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{PII: pii})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-run", "uuid-run", "run", 1),
+		makeExecRequestConstructedOBE(t, "inv-run", 2,
+			[]string{"/bin/bazel-out/.../bin/tool", "--flag", "value"},
+			"/home/user/workspace",
+			map[string]string{"FOO": "bar", "PATH": "/usr/bin"},
+			true,
+		),
+		makeBuildFinishedOBE(t, "inv-run", 3, 0, "SUCCESS"),
+	)
+	return sink
+}
+
+// TestExecRequest_AllPIIOn verifies every bazel.run.* attribute is stamped
+// when the necessary PII gates are open.
+func TestExecRequest_AllPIIOn(t *testing.T) {
+	sink := runExecRequestStream(t, PIIConfig{
+		IncludeCommandArgs: true,
+		IncludeWorkingDir:  true,
+	})
+	root := findRootSpan(t, sink)
+
+	// Always-on: count + should_exec.
+	count, ok := root.Attributes().Get("bazel.run.environment_variable_count")
+	require.True(t, ok)
+	assert.Equal(t, int64(2), count.Int())
+
+	se, ok := root.Attributes().Get("bazel.run.should_exec")
+	require.True(t, ok)
+	assert.True(t, se.Bool())
+
+	// Working directory (gated by IncludeWorkingDir).
+	wd, ok := root.Attributes().Get("bazel.run.working_directory")
+	require.True(t, ok)
+	assert.Equal(t, "/home/user/workspace", wd.Str())
+
+	// argv (gated by IncludeCommandArgs) as Slice[string].
+	argv, ok := root.Attributes().Get("bazel.run.argv")
+	require.True(t, ok)
+	require.Equal(t, pcommon.ValueTypeSlice, argv.Type())
+	require.Equal(t, 3, argv.Slice().Len())
+	assert.Equal(t, "/bin/bazel-out/.../bin/tool", argv.Slice().At(0).Str())
+	assert.Equal(t, "--flag", argv.Slice().At(1).Str())
+	assert.Equal(t, "value", argv.Slice().At(2).Str())
+
+	// environment (gated by IncludeCommandArgs) as Slice[Map{name,value}],
+	// sorted by key thanks to the test helper.
+	env, ok := root.Attributes().Get("bazel.run.environment")
+	require.True(t, ok)
+	require.Equal(t, pcommon.ValueTypeSlice, env.Type())
+	require.Equal(t, 2, env.Slice().Len())
+
+	first := env.Slice().At(0).Map()
+	name, ok := first.Get("name")
+	require.True(t, ok)
+	assert.Equal(t, "FOO", name.Str())
+	value, ok := first.Get("value")
+	require.True(t, ok)
+	assert.Equal(t, "bar", value.Str())
+
+	second := env.Slice().At(1).Map()
+	name2, ok := second.Get("name")
+	require.True(t, ok)
+	assert.Equal(t, "PATH", name2.Str())
+	value2, ok := second.Get("value")
+	require.True(t, ok)
+	assert.Equal(t, "/usr/bin", value2.Str())
+}
+
+// TestExecRequest_PIIOff_CountAndShouldExecStillEmitted asserts the default
+// (redacted) path still emits the safe count/should_exec attrs when the
+// ExecRequestConstructed event arrives, so operators retain a "run
+// invocation" signal.
+func TestExecRequest_PIIOff_CountAndShouldExecStillEmitted(t *testing.T) {
+	sink := runExecRequestStream(t, PIIConfig{})
+	root := findRootSpan(t, sink)
+
+	// Always-on attrs present.
+	count, ok := root.Attributes().Get("bazel.run.environment_variable_count")
+	require.True(t, ok)
+	assert.Equal(t, int64(2), count.Int())
+
+	se, ok := root.Attributes().Get("bazel.run.should_exec")
+	require.True(t, ok)
+	assert.True(t, se.Bool())
+
+	// Gated attrs redacted.
+	for _, key := range []string{
+		"bazel.run.argv",
+		"bazel.run.working_directory",
+		"bazel.run.environment",
+	} {
+		_, has := root.Attributes().Get(key)
+		assert.False(t, has, "expected %s to be redacted with PII off", key)
+	}
+}
+
+// TestExecRequest_WorkingDirGate_OnlyDir asserts IncludeWorkingDir alone
+// surfaces only working_directory; argv and environment stay redacted.
+func TestExecRequest_WorkingDirGate_OnlyDir(t *testing.T) {
+	sink := runExecRequestStream(t, PIIConfig{IncludeWorkingDir: true})
+	root := findRootSpan(t, sink)
+
+	wd, ok := root.Attributes().Get("bazel.run.working_directory")
+	require.True(t, ok)
+	assert.Equal(t, "/home/user/workspace", wd.Str())
+
+	_, hasArgv := root.Attributes().Get("bazel.run.argv")
+	assert.False(t, hasArgv, "argv must stay redacted without IncludeCommandArgs")
+	_, hasEnv := root.Attributes().Get("bazel.run.environment")
+	assert.False(t, hasEnv, "environment must stay redacted without IncludeCommandArgs")
+}
+
+// TestExecRequest_CommandArgsGate_ArgvAndEnv asserts IncludeCommandArgs
+// surfaces both argv and environment (shared gate per issue #63) while
+// keeping working_directory redacted.
+func TestExecRequest_CommandArgsGate_ArgvAndEnv(t *testing.T) {
+	sink := runExecRequestStream(t, PIIConfig{IncludeCommandArgs: true})
+	root := findRootSpan(t, sink)
+
+	argv, ok := root.Attributes().Get("bazel.run.argv")
+	require.True(t, ok)
+	require.Equal(t, pcommon.ValueTypeSlice, argv.Type())
+	assert.Equal(t, 3, argv.Slice().Len())
+
+	env, ok := root.Attributes().Get("bazel.run.environment")
+	require.True(t, ok)
+	require.Equal(t, pcommon.ValueTypeSlice, env.Type())
+	assert.Equal(t, 2, env.Slice().Len())
+
+	_, hasWD := root.Attributes().Get("bazel.run.working_directory")
+	assert.False(t, hasWD, "working_directory must stay redacted without IncludeWorkingDir")
+}
+
+// TestExecRequest_NoWorkingDirectory asserts that an ExecRequestConstructed
+// event with an empty working_directory does not emit a blank attribute even
+// when IncludeWorkingDir is true.
+func TestExecRequest_NoWorkingDirectory(t *testing.T) {
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{
+		PII: PIIConfig{IncludeWorkingDir: true, IncludeCommandArgs: true},
+	})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-run-nowd", "uuid-run-nowd", "run", 1),
+		makeExecRequestConstructedOBE(t, "inv-run-nowd", 2,
+			[]string{"tool"},
+			"", // empty working directory
+			map[string]string{"HOME": "/root"},
+			false,
+		),
+		makeBuildFinishedOBE(t, "inv-run-nowd", 3, 0, "SUCCESS"),
+	)
+
+	root := findRootSpan(t, sink)
+	_, has := root.Attributes().Get("bazel.run.working_directory")
+	assert.False(t, has, "empty working_directory must not emit the attribute")
+
+	se, ok := root.Attributes().Get("bazel.run.should_exec")
+	require.True(t, ok)
+	assert.False(t, se.Bool())
+}
+
+// TestExecRequest_BazelBuild_NoAttrsEmitted asserts that a regular `bazel
+// build` invocation (which does not emit ExecRequestConstructed) carries
+// none of the bazel.run.* attributes. Regression guard for the "only stamp
+// when the event arrived" contract.
+func TestExecRequest_BazelBuild_NoAttrsEmitted(t *testing.T) {
+	sink := new(consumertest.TracesSink)
+	tb := NewTraceBuilder(sink, nil, nil, zap.NewNop(), TraceBuilderConfig{
+		PII: PIIConfig{IncludeWorkingDir: true, IncludeCommandArgs: true},
+	})
+	tb.Start()
+	defer tb.Stop()
+	ctx := context.Background()
+
+	processEvents(ctx, t, tb,
+		makeBuildStartedOBE(t, "inv-build", "uuid-build", "build", 1),
+		makeBuildFinishedOBE(t, "inv-build", 2, 0, "SUCCESS"),
+	)
+
+	root := findRootSpan(t, sink)
+	for _, key := range []string{
+		"bazel.run.argv",
+		"bazel.run.working_directory",
+		"bazel.run.environment_variable_count",
+		"bazel.run.environment",
+		"bazel.run.should_exec",
+	} {
+		_, has := root.Attributes().Get(key)
+		assert.False(t, has, "bazel build must not emit %s (no ExecRequestConstructed event)", key)
+	}
+}
