@@ -1,0 +1,30 @@
+# Fast-path pre-commit hooks. Run via `prek` (drop-in for pre-commit):
+#   make precommit-install   # installs prek and wires up .git/hooks/pre-commit
+#   make precommit           # runs all hooks against every file
+#
+# Scope: only staged Go files / their packages. Authoritative lint+test pass
+# lives in CI (.github/workflows/ci.yml) — keep this loop fast.
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+      - id: mixed-line-ending
+
+  - repo: local
+    hooks:
+      - id: golangci-lint
+        name: golangci-lint (changed packages)
+        description: Lint Go packages whose files are staged.
+        language: system
+        types: [go]
+        # examples/bazel-project/ is a separate Go module (own go.mod);
+        # exclude it so the root-module linter doesn't see foreign packages.
+        exclude: ^examples/bazel-project/
+        pass_filenames: true
+        require_serial: true
+        entry: scripts/precommit-golangci-lint.sh

@@ -60,7 +60,14 @@ make tidy       # go mod tidy
 make generate   # buf generate third_party/bazel/protobuf (regenerate Go code from protos)
 make ocb        # build custom collector binary with OCB
 make docker     # docker build
+
+make pre-commit-install  # install prek + wire up git pre-commit hook
+make pre-commit          # run all pre-commit hooks against every file
 ```
+
+Pre-commit is fast-path: lints only packages of staged Go files
+(`scripts/precommit-golangci-lint.sh`). CI remains the authoritative
+full-module pass.
 
 ## Dependencies
 
