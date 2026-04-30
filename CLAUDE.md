@@ -61,13 +61,14 @@ make generate   # buf generate third_party/bazel/protobuf (regenerate Go code fr
 make ocb        # build custom collector binary with OCB
 make docker     # docker build
 
-make pre-commit-install  # install prek + wire up git pre-commit hook
-make pre-commit          # run all pre-commit hooks against every file
+make pre-commit-install  # install prek + wire up git pre-commit and pre-push hooks
+make pre-commit          # run pre-commit-stage hooks (fast: changed packages)
+make pre-push            # run pre-push-stage hooks (slow: full module lint)
 ```
 
-Pre-commit is fast-path: lints only packages of staged Go files
-(`scripts/precommit-golangci-lint.sh`). CI remains the authoritative
-full-module pass.
+Two-stage setup: `pre-commit` lints only packages of staged Go files
+(`scripts/precommit-golangci-lint.sh`); `pre-push` runs `golangci-lint run ./...`
+over the root module before pushing. CI remains the authoritative pass.
 
 ## Dependencies
 

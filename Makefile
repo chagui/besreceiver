@@ -1,6 +1,6 @@
 .PHONY: all build test test-short test-cover test-bench test-e2e lint vet clean fuzz fix generate ocb ci docker \
        compose-build compose-up compose-down compose-clean example record record-fixtures agent-status nilaway deadcode changelog \
-       install uninstall pre-commit-install pre-commit
+       install uninstall pre-commit-install pre-commit pre-push
 
 # Use absolute path: GNU Make 3.81 (macOS default) doesn't propagate export PATH to recipe shells.
 GOTESTSUM := $(shell go env GOPATH)/bin/gotestsum
@@ -147,11 +147,15 @@ install:
 uninstall:
 	sudo packaging/uninstall.sh $(if $(CONFIRM),--yes,) $(UNINSTALL_ARGS)
 
-## pre-commit-install: Install prek and wire up the git pre-commit hook
+## pre-commit-install: Install prek and wire up the git pre-commit + pre-push hooks
 pre-commit-install:
 	@command -v prek >/dev/null || cargo binstall --locked prek
-	prek install
+	prek install --hook-type pre-commit --hook-type pre-push
 
-## pre-commit: Run pre-commit hooks against all files (CI-equivalent)
+## pre-commit: Run pre-commit-stage hooks against all files (fast path)
 pre-commit:
 	prek run --all-files
+
+## pre-push: Run pre-push-stage hooks against all files (slow path; full-module lint)
+pre-push:
+	prek run --all-files --hook-stage pre-push

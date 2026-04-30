@@ -17,14 +17,28 @@ repos:
 
   - repo: local
     hooks:
+      # Fast path: lint only the packages of staged Go files (per-commit).
       - id: golangci-lint
         name: golangci-lint (changed packages)
         description: Lint Go packages whose files are staged.
         language: system
         types: [go]
+        stages: [pre-commit]
         # examples/bazel-project/ is a separate Go module (own go.mod);
         # exclude it so the root-module linter doesn't see foreign packages.
         exclude: ^examples/bazel-project/
         pass_filenames: true
         require_serial: true
         entry: scripts/precommit-golangci-lint.sh
+
+      # Slow path: lint the whole root module before pushing. Mirrors CI.
+      - id: golangci-lint-full
+        name: golangci-lint (full module)
+        description: Run golangci-lint over ./... before pushing.
+        language: system
+        types: [go]
+        stages: [pre-push]
+        pass_filenames: false
+        always_run: true
+        require_serial: true
+        entry: golangci-lint run ./...
