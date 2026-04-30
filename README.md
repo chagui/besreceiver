@@ -68,6 +68,16 @@ make test-bench # Run benchmarks
 make fuzz       # Run fuzz tests
 ```
 
+Optional: install the [prek](https://github.com/j178/prek) git hooks to lint
+staged Go packages on commit and the full module on push (CI remains the
+source of truth):
+
+```bash
+make pre-commit-install   # cargo binstall prek + wire up commit & push hooks
+make pre-commit           # fast: lint changed packages
+make pre-push             # slow: lint the whole root module
+```
+
 ## Documentation
 
 - [Architecture](docs/architecture.md) -- system overview, internal components, and span hierarchy
